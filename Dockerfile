@@ -5,6 +5,7 @@ WORKDIR /src
 # Copy solution and project files first for better layer caching
 COPY XrmEmulator.sln ./
 COPY src/XrmEmulator/XrmEmulator.csproj src/XrmEmulator/
+COPY src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj src/XrmEmulator.Licensing/
 COPY external/XrmMockup/src/XrmMockup365/XrmMockup365.csproj external/XrmMockup/src/XrmMockup365/
 COPY external/XrmMockup/src/MetadataSkeleton/ external/XrmMockup/src/MetadataSkeleton/
 COPY external/XrmMockup/RELEASE_NOTES.md external/XrmMockup/
@@ -15,6 +16,7 @@ RUN dotnet restore src/XrmEmulator/XrmEmulator.csproj
 
 # Copy remaining source
 COPY src/XrmEmulator/ src/XrmEmulator/
+COPY src/XrmEmulator.Licensing/ src/XrmEmulator.Licensing/
 COPY external/XrmMockup/src/ external/XrmMockup/src/
 
 # Publish
