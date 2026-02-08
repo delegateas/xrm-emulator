@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.1.0...v1.2.0) (2026-02-08)
+
+
+### Features
+
+* Add licensing project files to Docker build process ([202e777](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/202e77788f33b74dabb4d35d7bbef32747ffcf7b))
+
 ## [1.1.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.0.0...v1.1.0) (2026-02-08)
 
 
