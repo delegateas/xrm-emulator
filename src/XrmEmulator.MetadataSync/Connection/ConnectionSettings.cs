@@ -9,10 +9,22 @@ public enum AuthMode
 
 public record ConnectionSettings
 {
+    /// <summary>
+    /// Microsoft's well-known public client ID for Dataverse sample applications.
+    /// No client secret required — suitable for interactive/delegated auth.
+    /// </summary>
+    public const string MicrosoftPublicClientId = "51f81489-12ee-4a9e-aaae-a2591f45987d";
+
+    /// <summary>
+    /// Redirect URI registered for Microsoft's well-known public client ID.
+    /// </summary>
+    public const string MicrosoftPublicRedirectUri = "app://58145B91-0C36-4500-8554-080854F2AC97";
+
     public required string Url { get; init; }
     public string? TenantId { get; init; }
     public string? ClientId { get; init; }
     public string? ClientSecret { get; init; }
     public string? ConnectionString { get; init; }
+    public string? RedirectUri { get; init; }
     public required AuthMode AuthMode { get; init; }
 }

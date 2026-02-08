@@ -20,7 +20,7 @@ public static class ConnectionFactory
                 $"AuthType=ClientSecret;Url={settings.Url};ClientId={settings.ClientId};ClientSecret={settings.ClientSecret};TenantId={settings.TenantId}",
 
             AuthMode.InteractiveBrowser =>
-                $"AuthType=OAuth;Url={settings.Url};ClientId={settings.ClientId};RedirectUri=http://localhost;LoginPrompt=Auto",
+                $"AuthType=OAuth;Url={settings.Url};ClientId={settings.ClientId};RedirectUri={settings.RedirectUri ?? "http://localhost"};LoginPrompt=Auto",
 
             _ => throw new ArgumentOutOfRangeException(nameof(settings.AuthMode), settings.AuthMode, "Unsupported auth mode.")
         };

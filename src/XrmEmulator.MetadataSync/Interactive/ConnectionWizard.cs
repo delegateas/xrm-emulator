@@ -52,7 +52,7 @@ public static class ConnectionWizard
         return AnsiConsole.Prompt(
             new SelectionPrompt<AuthMode>()
                 .Title("Select [green]authentication method[/]:")
-                .AddChoices(AuthMode.ClientSecret, AuthMode.InteractiveBrowser, AuthMode.ConnectionString)
+                .AddChoices(AuthMode.InteractiveBrowser, AuthMode.ClientSecret, AuthMode.ConnectionString)
                 .UseConverter(mode => mode switch
                 {
                     AuthMode.ClientSecret => "Client Secret (App Registration)",
@@ -108,12 +108,21 @@ public static class ConnectionWizard
             new TextPrompt<string>("Enter [green]Dataverse URL[/] (e.g. https://org.crm.dynamics.com):"));
 
         var clientId = configClientId ?? AnsiConsole.Prompt(
-            new TextPrompt<string>("Enter [green]Client ID[/] (App Registration):"));
+            new TextPrompt<string>("Enter [green]Client ID[/] (App Registration, press Enter for Microsoft default):")
+                .DefaultValue(ConnectionSettings.MicrosoftPublicClientId)
+                .ShowDefaultValue());
+
+        // Use Microsoft's well-known redirect URI for their public client ID,
+        // otherwise use app://{clientId} which is the standard convention for native/public clients.
+        var redirectUri = clientId == ConnectionSettings.MicrosoftPublicClientId
+            ? ConnectionSettings.MicrosoftPublicRedirectUri
+            : $"app://{clientId}";
 
         return new ConnectionSettings
         {
             Url = url,
             ClientId = clientId,
+            RedirectUri = redirectUri,
             AuthMode = AuthMode.InteractiveBrowser
         };
     }
