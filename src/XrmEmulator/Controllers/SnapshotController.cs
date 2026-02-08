@@ -1,5 +1,6 @@
 using DG.Tools.XrmMockup;
 using Microsoft.AspNetCore.Mvc;
+using XrmEmulator.Licensing;
 using XrmEmulator.Services;
 
 namespace XrmEmulator.Controllers;
@@ -13,6 +14,7 @@ public class SnapshotController : ControllerBase
 {
     private readonly XrmMockup365 _xrmMockup;
     private readonly ISnapshotService _snapshotService;
+    private readonly ILicenseProvider _licenseProvider;
     private readonly ILogger<SnapshotController> _logger;
 
     // Thread-safety: Only one restore operation at a time (XrmMockup is singleton)
@@ -21,10 +23,12 @@ public class SnapshotController : ControllerBase
     public SnapshotController(
         XrmMockup365 xrmMockup,
         ISnapshotService snapshotService,
+        ILicenseProvider licenseProvider,
         ILogger<SnapshotController> logger)
     {
         _xrmMockup = xrmMockup;
         _snapshotService = snapshotService;
+        _licenseProvider = licenseProvider;
         _logger = logger;
     }
 
@@ -38,6 +42,9 @@ public class SnapshotController : ControllerBase
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> DownloadSnapshot(CancellationToken cancellationToken)
     {
+        if (!_licenseProvider.IsFeatureLicensed(LicenseFeatures.Snapshots))
+            return StatusCode(402, new { error = "Feature 'snapshots' requires a license", feature = LicenseFeatures.Snapshots });
+
         try
         {
             // Save current state to temporary file
@@ -80,6 +87,9 @@ public class SnapshotController : ControllerBase
     [RequestSizeLimit(500_000_000)] // 500 MB limit
     public async Task<IActionResult> RestoreSnapshot(IFormFile file, CancellationToken cancellationToken)
     {
+        if (!_licenseProvider.IsFeatureLicensed(LicenseFeatures.Snapshots))
+            return StatusCode(402, new { error = "Feature 'snapshots' requires a license", feature = LicenseFeatures.Snapshots });
+
         if (file == null || file.Length == 0)
         {
             return BadRequest(new { error = "No file uploaded or file is empty" });
@@ -160,6 +170,9 @@ public class SnapshotController : ControllerBase
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> RestoreFromFile([FromBody] RestoreFromFileRequest request, CancellationToken cancellationToken)
     {
+        if (!_licenseProvider.IsFeatureLicensed(LicenseFeatures.Snapshots))
+            return StatusCode(402, new { error = "Feature 'snapshots' requires a license", feature = LicenseFeatures.Snapshots });
+
         if (string.IsNullOrWhiteSpace(request.FilePath))
         {
             return BadRequest(new { error = "FilePath is required" });

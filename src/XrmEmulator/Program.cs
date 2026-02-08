@@ -6,6 +6,7 @@ using Microsoft.OData.ModelBuilder;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
 using Serilog;
+using XrmEmulator.Licensing;
 using XrmEmulator.Middleware;
 using XrmEmulator.Services;
 
@@ -72,6 +73,9 @@ builder.Services.AddCors(options =>
     });
 });
 
+// Add licensing
+builder.Services.AddLicensing();
+
 // Add custom services
 builder.Services.AddSingleton<XrmEmulator.Services.ITokenService, TokenService>();
 
@@ -128,6 +132,21 @@ builder.Services.AddAuthorization();
 builder.Services.AddControllers();
 
 var app = builder.Build();
+
+// Log license status
+var licenseProvider = app.Services.GetRequiredService<ILicenseProvider>();
+if (licenseProvider.CurrentLicense is { } license)
+{
+    Log.Information("License: Licensed to {Subject} (features: {Features}, expires: {Expiry})",
+        license.Subject,
+        string.Join(", ", license.Features),
+        license.ExpiresAt?.ToString("yyyy-MM-dd") ?? "never");
+}
+else
+{
+    Log.Information("License: Unlicensed (core features only). {Error}",
+        licenseProvider.ValidationResult.Error ?? "No license key provided");
+}
 
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())

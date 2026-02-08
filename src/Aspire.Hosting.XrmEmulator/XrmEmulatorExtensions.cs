@@ -128,4 +128,32 @@ public static class XrmEmulatorExtensions
         builder.WithEnvironment("Snapshot__Enabled", "false");
         return builder;
     }
+
+    /// <summary>
+    /// Configures a license key for the XRM Emulator.
+    /// Licensed features (snapshots, plugins, multi-org) require a valid license key.
+    /// </summary>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="licenseKey">The license key string.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<T> WithLicenseKey<T>(
+        this IResourceBuilder<T> builder,
+        string licenseKey) where T : IResourceWithEnvironment
+    {
+        return builder.WithEnvironment("XRMEMULATOR_LICENSE", licenseKey);
+    }
+
+    /// <summary>
+    /// Configures a license key for the XRM Emulator by reading it from a file.
+    /// </summary>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="licenseFilePath">Path to a .lic file containing the license key.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<T> WithLicenseFile<T>(
+        this IResourceBuilder<T> builder,
+        string licenseFilePath) where T : IResourceWithEnvironment
+    {
+        var key = File.ReadAllText(licenseFilePath).Trim();
+        return builder.WithEnvironment("XRMEMULATOR_LICENSE", key);
+    }
 }

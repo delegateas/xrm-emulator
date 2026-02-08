@@ -88,9 +88,40 @@ jobs:
           -o ./nupkg
           -p:Version=${{ needs.release-please.outputs.version }}
 
+      - name: Pack Aspire Hosting
+        run: >
+          dotnet pack src/Aspire.Hosting.XrmEmulator/Aspire.Hosting.XrmEmulator.csproj
+          -c Release
+          -o ./nupkg
+          -p:Version=${{ needs.release-please.outputs.version }}
+
+      - name: Pack Licensing library
+        run: >
+          dotnet pack src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj
+          -c Release
+          -o ./nupkg
+          -p:Version=${{ needs.release-please.outputs.version }}
+
+      - name: Pack LicenseGenerator tool
+        run: >
+          dotnet pack src/XrmEmulator.LicenseGenerator/XrmEmulator.LicenseGenerator.csproj
+          -c Release
+          -o ./nupkg
+          -p:Version=${{ needs.release-please.outputs.version }}
+
       - name: Push to GitHub Packages
         run: >
           dotnet nuget push ./nupkg/*.nupkg
           --source https://nuget.pkg.github.com/delegateas/index.json
           --api-key ${{ secrets.GITHUB_TOKEN }}
+          --skip-duplicate
+
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: env.NUGET_API_KEY != ''
+        run: >
+          dotnet nuget push ./nupkg/*.nupkg
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ secrets.NUGET_API_KEY }}
           --skip-duplicate

@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\external\XrmMockup\src\XrmMockup365\XrmMockup365.csproj" />
+    <ProjectReference Include="..\XrmEmulator.Licensing\XrmEmulator.Licensing.csproj" />
   </ItemGroup>
 
   <ItemGroup>

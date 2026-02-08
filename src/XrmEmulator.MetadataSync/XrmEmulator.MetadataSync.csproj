@@ -10,10 +10,10 @@
     <PackageId>XrmEmulator.MetadataSync</PackageId>
     <Version>0.1.0</Version>
     <Description>Interactive CLI tool to sync Dataverse metadata into XrmMockup format for XrmEmulator</Description>
-    <Authors>DelegateAS</Authors>
+    <Authors>XrmEmulator</Authors>
     <PackageProjectUrl>https://github.com/delegateas/xrm-emulator</PackageProjectUrl>
     <RepositoryUrl>https://github.com/delegateas/xrm-emulator</RepositoryUrl>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>LGPL-3.0-or-later</PackageLicenseExpression>
     <PackageTags>dataverse;xrm;metadata;crm;xrmmockup</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>

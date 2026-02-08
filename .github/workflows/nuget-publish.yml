@@ -27,5 +27,17 @@ jobs:
       - name: Build MetadataSync
         run: dotnet build src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release
 
+      - name: Build Licensing
+        run: dotnet build src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj -c Release
+
+      - name: Build LicenseGenerator
+        run: dotnet build src/XrmEmulator.LicenseGenerator/XrmEmulator.LicenseGenerator.csproj -c Release
+
       - name: Pack MetadataSync (verify)
         run: dotnet pack src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release -o ./nupkg
+
+      - name: Pack Licensing (verify)
+        run: dotnet pack src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj -c Release -o ./nupkg
+
+      - name: Pack LicenseGenerator (verify)
+        run: dotnet pack src/XrmEmulator.LicenseGenerator/XrmEmulator.LicenseGenerator.csproj -c Release -o ./nupkg
