@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.0.0...v1.1.0) (2026-02-08)
+
+
+### Features
+
+* Implement licensing system using Ed25519 cryptography ([78f4866](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/78f4866503c4aab5b8739517e04e1311e5dcaffd))
+
 ## 1.0.0 (2026-02-08)
 
 
