@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -27,6 +29,31 @@ public partial class OAuthTokenProvider
 
     public async Task AuthenticateAsync()
     {
+        // Try cached refresh token first
+        var cached = TokenCache.Load(_dataverseUrl, _clientId);
+        if (cached != null)
+        {
+            AnsiConsole.MarkupLine("[grey]Found cached credentials, attempting silent refresh...[/]");
+            var tenantId = cached.TenantId;
+            _tokenEndpoint = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token";
+            _authorizeEndpoint = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/authorize";
+            _refreshToken = cached.RefreshToken;
+
+            try
+            {
+                await RefreshTokenAsync();
+                SaveTokenToCache(tenantId);
+                AnsiConsole.MarkupLine("[green]Authentication successful (cached).[/]");
+                return;
+            }
+            catch
+            {
+                AnsiConsole.MarkupLine("[yellow]Cached token expired, falling back to browser sign-in...[/]");
+                TokenCache.Clear(_dataverseUrl, _clientId);
+                _refreshToken = null;
+            }
+        }
+
         AnsiConsole.MarkupLine("[grey]Discovering tenant...[/]");
         await DiscoverTenantEndpointsAsync();
 
@@ -49,12 +76,19 @@ public partial class OAuthTokenProvider
             $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
             $"&code_challenge_method=S256";
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine("[bold yellow]Open this URL to sign in:[/]");
-        AnsiConsole.WriteLine();
-        Console.Out.WriteLine(authorizeUrl);
-        AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine("[grey]Waiting for authentication callback...[/]");
+        if (TryOpenBrowser(authorizeUrl))
+        {
+            AnsiConsole.MarkupLine("[grey]Browser opened. Waiting for sign-in...[/]");
+        }
+        else
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[bold yellow]Open this URL to sign in:[/]");
+            AnsiConsole.WriteLine();
+            Console.Out.WriteLine(authorizeUrl);
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[grey]Waiting for authentication callback...[/]");
+        }
 
         var context = await listener.GetContextAsync();
         var code = context.Request.QueryString["code"];
@@ -79,6 +113,9 @@ public partial class OAuthTokenProvider
         }
 
         await ExchangeCodeForTokenAsync(code, redirectUri, codeVerifier);
+
+        // Cache the refresh token for future runs
+        SaveTokenToCache(ExtractTenantId());
 
         AnsiConsole.MarkupLine("[green]Authentication successful.[/]");
     }
@@ -205,6 +242,45 @@ public partial class OAuthTokenProvider
         var port = ((IPEndPoint)socket.LocalEndpoint).Port;
         socket.Stop();
         return port;
+    }
+
+    private static bool TryOpenBrowser(string url)
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                Process.Start("open", url);
+            }
+            else
+            {
+                Process.Start("xdg-open", url);
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string ExtractTenantId()
+    {
+        // _tokenEndpoint is like https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token
+        var uri = new Uri(_tokenEndpoint!);
+        return uri.Segments[1].TrimEnd('/');
+    }
+
+    private void SaveTokenToCache(string tenantId)
+    {
+        if (_refreshToken != null)
+        {
+            TokenCache.Save(_dataverseUrl, _clientId, tenantId, _refreshToken);
+        }
     }
 
     [GeneratedRegex(@"authorization_uri=(\S+)")]

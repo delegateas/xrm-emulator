@@ -25,7 +25,7 @@ try
         .Build();
 
     // 2. Run ConnectionWizard to get connection settings
-    var connectionSettings = ConnectionWizard.Run(configuration);
+    var connectionSettings = await ConnectionWizard.RunAsync(configuration);
 
     // 3. Create ServiceClient via ConnectionFactory
     using var client = await ConnectionFactory.CreateAsync(connectionSettings);
