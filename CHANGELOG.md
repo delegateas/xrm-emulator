@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.4.0...v1.5.0) (2026-02-08)
+
+
+### Features
+
+* Implement OAuth token caching and environment discovery features ([16f901b](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/16f901b1e597ace3377f9fae3f4299639aed14ef))
+
+
+### Bug Fixes
+
+* Update .gitignore to include 'data' directory and ensure private.key is ignored ([07bfe0a](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/07bfe0ab489db5aebd95c33faa7bd963938aa4ac))
+
 ## [1.4.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.3.0...v1.4.0) (2026-02-08)
 
 
