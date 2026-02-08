@@ -6,3 +6,4 @@ spikes
 .keys/
 *.private.key
 private.key
+data
