@@ -8,7 +8,14 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>xrm-metadata-sync</ToolCommandName>
     <PackageId>XrmEmulator.MetadataSync</PackageId>
+    <Version>0.1.0</Version>
     <Description>Interactive CLI tool to sync Dataverse metadata into XrmMockup format for XrmEmulator</Description>
+    <Authors>DelegateAS</Authors>
+    <PackageProjectUrl>https://github.com/delegateas/xrm-emulator</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/delegateas/xrm-emulator</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>dataverse;xrm;metadata;crm;xrmmockup</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +23,10 @@
     <PackageReference Include="Spectre.Console" Version="0.49.1" />
     <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <Import Project="..\..\external\XrmMockup\src\MetadataSkeleton\MetadataSkeleton.projitems" Label="Shared" />
