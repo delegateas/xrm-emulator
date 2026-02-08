@@ -7,6 +7,8 @@ COPY XrmEmulator.sln ./
 COPY src/XrmEmulator/XrmEmulator.csproj src/XrmEmulator/
 COPY external/XrmMockup/src/XrmMockup365/XrmMockup365.csproj external/XrmMockup/src/XrmMockup365/
 COPY external/XrmMockup/src/MetadataSkeleton/ external/XrmMockup/src/MetadataSkeleton/
+COPY external/XrmMockup/RELEASE_NOTES.md external/XrmMockup/
+COPY external/XrmMockup/Directory.Build.props external/XrmMockup/
 
 # Restore dependencies
 RUN dotnet restore src/XrmEmulator/XrmEmulator.csproj

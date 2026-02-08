@@ -1,19 +1,12 @@
-name: Build and Publish NuGet Packages
+name: CI - Build & Pack
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
 
 jobs:
-  build-and-publish:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,12 +18,14 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Build
+      - name: Build XrmEmulator
+        run: dotnet build src/XrmEmulator/XrmEmulator.csproj -c Release
+
+      - name: Build Aspire Hosting
+        run: dotnet build src/Aspire.Hosting.XrmEmulator/Aspire.Hosting.XrmEmulator.csproj -c Release
+
+      - name: Build MetadataSync
         run: dotnet build src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release
 
-      - name: Pack
+      - name: Pack MetadataSync (verify)
         run: dotnet pack src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release -o ./nupkg
-
-      - name: Push to GitHub Packages
-        if: github.event_name != 'pull_request'
-        run: dotnet nuget push ./nupkg/*.nupkg --source https://nuget.pkg.github.com/delegateas/index.json --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
