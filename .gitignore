@@ -1,0 +1,9 @@
+obj
+bin
+spikes
+
+# License key generation - private keys must never be committed
+.keys/
+*.private.key
+private.key
+data

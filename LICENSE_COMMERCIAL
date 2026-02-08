@@ -1,0 +1,202 @@
+XrmEmulator Commercial License Agreement
+=========================================
+
+Copyright (c) 2025 XrmEmulator. All rights reserved.
+
+This Commercial License Agreement ("Agreement") is a legal agreement between
+you ("Licensee") and XrmEmulator, the copyright holder ("Licensor"), for the use
+of XrmEmulator software and associated documentation ("Software").
+
+By purchasing a license and using the Software, you agree to be bound by the
+terms and conditions of this Agreement. If you do not agree to the terms of
+this Agreement, do not use the Software.
+
+
+1. OWNERSHIP AND LICENSE GRANT
+
+1.1. The Software is the intellectual property of XrmEmulator and is protected
+by copyright laws and international treaty provisions. XrmEmulator retains all
+rights, title, and interest in and to the Software, including all intellectual
+property rights therein.
+
+1.2. Subject to the terms of this Agreement and payment of the applicable
+license fee, XrmEmulator grants you a non-exclusive, non-transferable,
+worldwide license to:
+
+  (a) Use the Software for your internal business purposes;
+
+  (b) Modify the Software source code for your own use, including but not
+      limited to creating private forks and derivative works;
+
+  (c) Deploy the Software (including any modifications) in your own
+      applications, services, and infrastructure.
+
+
+2. PERMITTED USES
+
+2.1. You may modify the Software source code to suit your specific
+requirements. Unlike the LGPL v3 license option, you are not required to
+publish or disclose your modifications.
+
+2.2. You may use the Software in development, testing, staging, and production
+environments.
+
+2.3. You may make backup copies of the Software for archival purposes.
+
+2.4. You may deploy the Software as part of your applications and services,
+including in containerized environments, cloud infrastructure, and CI/CD
+pipelines.
+
+
+3. DISTRIBUTION
+
+3.1. You may distribute the Software (including modifications) solely as an
+integrated part of your own applications and services, provided that:
+
+  (a) The Software is not the primary value proposition of your application
+      or service;
+
+  (b) Your application or service adds substantial functionality beyond what
+      the Software provides;
+
+  (c) You include a copyright notice attributing the Software to XrmEmulator
+      in your application's documentation or about section.
+
+3.2. You may provide the Software to contractors and consultants working on
+your behalf, provided they agree to terms at least as restrictive as this
+Agreement.
+
+
+4. PROHIBITED USES
+
+4.1. You may NOT redistribute the Software or any derivative work as a
+standalone development toolkit, library, framework, or similar product that
+is designed to be used by other developers or organizations as a software
+dependency or development tool.
+
+4.2. You may NOT remove, alter, or obscure any copyright notices, trademark
+notices, or other proprietary notices of XrmEmulator contained in the
+Software.
+
+4.3. You may NOT remove, disable, or circumvent any license validation
+mechanisms included in the Software.
+
+4.4. You may NOT use the Software to create a product or service that
+competes directly with XrmEmulator or any other product offered by
+XrmEmulator.
+
+4.5. You may NOT sublicense, sell, lease, rent, or otherwise transfer the
+Software or your rights under this Agreement to any third party, except as
+expressly permitted in Section 3.
+
+4.6. You may NOT use the Software in any manner that violates applicable
+laws or regulations.
+
+
+5. TERMINATION
+
+5.1. This Agreement is effective until terminated. XrmEmulator may terminate
+this Agreement immediately upon written notice if you breach any term of this
+Agreement.
+
+5.2. Upon termination, you must:
+
+  (a) Cease all use of the Software;
+
+  (b) Destroy or return all copies of the Software in your possession or
+      control;
+
+  (c) Remove the Software from all deployed environments within thirty (30)
+      days.
+
+5.3. Sections 1.1, 4, 6, 7, 8, 9, 10, and 11 shall survive any termination
+of this Agreement.
+
+
+6. DISCLAIMER OF WARRANTIES
+
+6.1. THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+6.2. XRMEMULATOR DOES NOT WARRANT THAT THE SOFTWARE WILL MEET YOUR
+REQUIREMENTS, THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR
+ERROR-FREE, OR THAT DEFECTS IN THE SOFTWARE WILL BE CORRECTED.
+
+6.3. YOU ASSUME THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE
+SOFTWARE.
+
+
+7. LIMITATION OF LIABILITY
+
+7.1. IN NO EVENT SHALL XRMEMULATOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT NOT LIMITED TO
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, LOSS OF USE, DATA, OR PROFITS,
+OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THE SOFTWARE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+7.2. IN NO EVENT SHALL THE TOTAL LIABILITY OF XRMEMULATOR UNDER THIS
+AGREEMENT EXCEED THE AMOUNT OF LICENSE FEES ACTUALLY PAID BY YOU TO
+XRMEMULATOR FOR THE SOFTWARE DURING THE TWELVE (12) MONTHS PRECEDING THE
+EVENT GIVING RISE TO LIABILITY.
+
+
+8. VERIFICATION
+
+8.1. XrmEmulator reserves the right to request, no more than once per
+calendar year, a written certification from you confirming that the Software
+is being used in accordance with the terms of this Agreement.
+
+8.2. You agree to provide such certification within thirty (30) days of
+receiving such a request.
+
+
+9. SUPPORT AND UPDATES
+
+9.1. This Agreement does not entitle you to any support, maintenance, or
+updates for the Software unless separately agreed in writing.
+
+9.2. Any updates, upgrades, or new versions of the Software provided to you
+shall be subject to the terms of this Agreement, unless accompanied by a
+separate license agreement.
+
+
+10. GOVERNING LAW AND JURISDICTION
+
+10.1. This Agreement shall be governed by and construed in accordance with
+the laws of Denmark, without regard to its conflict of law provisions.
+
+10.2. Any dispute arising out of or in connection with this Agreement shall
+be submitted to the exclusive jurisdiction of the courts of Denmark.
+
+10.3. The United Nations Convention on Contracts for the International Sale
+of Goods shall not apply to this Agreement.
+
+
+11. GENERAL PROVISIONS
+
+11.1. This Agreement constitutes the entire agreement between you and
+XrmEmulator with respect to the Software and supersedes all prior or
+contemporaneous oral or written communications, proposals, and
+representations with respect to the Software.
+
+11.2. If any provision of this Agreement is held to be invalid or
+unenforceable, the remaining provisions shall continue in full force and
+effect.
+
+11.3. The failure of XrmEmulator to exercise or enforce any right or
+provision of this Agreement shall not constitute a waiver of such right or
+provision.
+
+11.4. This Agreement may not be amended or modified except by a written
+instrument signed by both parties.
+
+11.5. You may not assign or transfer this Agreement or any rights or
+obligations hereunder without the prior written consent of XrmEmulator.
+XrmEmulator may assign this Agreement without restriction.
+
+
+For licensing inquiries, please visit:
+https://github.com/delegateas/xrm-emulator
