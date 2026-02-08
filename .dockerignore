@@ -1,0 +1,16 @@
+.devcontainer/
+spikes/
+.claude/
+.git/
+.github/
+.vscode/
+**/bin/
+**/obj/
+**/*.user
+**/*.suo
+**/.vs/
+*.md
+.mcp.json
+.dockerignore
+Dockerfile
+samples/
