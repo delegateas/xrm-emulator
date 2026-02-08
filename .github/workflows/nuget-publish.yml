@@ -1,0 +1,43 @@
+name: CI - Build & Pack
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build XrmEmulator
+        run: dotnet build src/XrmEmulator/XrmEmulator.csproj -c Release
+
+      - name: Build Aspire Hosting
+        run: dotnet build src/Aspire.Hosting.XrmEmulator/Aspire.Hosting.XrmEmulator.csproj -c Release
+
+      - name: Build MetadataSync
+        run: dotnet build src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release
+
+      - name: Build Licensing
+        run: dotnet build src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj -c Release
+
+      - name: Build LicenseGenerator
+        run: dotnet build src/XrmEmulator.LicenseGenerator/XrmEmulator.LicenseGenerator.csproj -c Release
+
+      - name: Pack MetadataSync (verify)
+        run: dotnet pack src/XrmEmulator.MetadataSync/XrmEmulator.MetadataSync.csproj -c Release -o ./nupkg
+
+      - name: Pack Licensing (verify)
+        run: dotnet pack src/XrmEmulator.Licensing/XrmEmulator.Licensing.csproj -c Release -o ./nupkg
+
+      - name: Pack LicenseGenerator (verify)
+        run: dotnet pack src/XrmEmulator.LicenseGenerator/XrmEmulator.LicenseGenerator.csproj -c Release -o ./nupkg
