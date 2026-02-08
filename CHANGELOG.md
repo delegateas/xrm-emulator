@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.2.0...v1.3.0) (2026-02-08)
+
+
+### Features
+
+* Enhance authentication options with Microsoft public client ID and redirect URI ([8ce6b7c](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/8ce6b7c4eb6a158d8fae54753c61fb2e11a33510))
+
 ## [1.2.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.1.0...v1.2.0) (2026-02-08)
 
 
