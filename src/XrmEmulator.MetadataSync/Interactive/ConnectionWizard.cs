@@ -112,17 +112,10 @@ public static class ConnectionWizard
                 .DefaultValue(ConnectionSettings.MicrosoftPublicClientId)
                 .ShowDefaultValue());
 
-        // Use Microsoft's well-known redirect URI for their public client ID,
-        // otherwise use app://{clientId} which is the standard convention for native/public clients.
-        var redirectUri = clientId == ConnectionSettings.MicrosoftPublicClientId
-            ? ConnectionSettings.MicrosoftPublicRedirectUri
-            : $"app://{clientId}";
-
         return new ConnectionSettings
         {
             Url = url,
             ClientId = clientId,
-            RedirectUri = redirectUri,
             AuthMode = AuthMode.InteractiveBrowser
         };
     }

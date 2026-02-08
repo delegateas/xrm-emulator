@@ -28,7 +28,7 @@ try
     var connectionSettings = ConnectionWizard.Run(configuration);
 
     // 3. Create ServiceClient via ConnectionFactory
-    using var client = ConnectionFactory.Create(connectionSettings);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
 
     // 4. Run SolutionPicker to select solution
     var solutionId = SolutionPicker.Run(client);

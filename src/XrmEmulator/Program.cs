@@ -103,11 +103,6 @@ builder.Services.AddSingleton<XrmMockup365>(provider =>
     };
 
     var xrm = XrmMockup365.GetInstance(settings);
-    var admin = xrm.GetAdminService();
-
-    // Create test users for netbank messages
-    CreateTestUsers(xrm, admin);
-
     return xrm;
 });
 
@@ -195,70 +190,6 @@ if (snapshotService is SnapshotService snapshotServiceImpl)
 }
 
 app.Run();
-
-static void CreateTestUsers(XrmMockup365 xrm, IOrganizationService admin)
-{
-    // Create bank employee users with bd_bankuserid (RACFID) following UBI<INITIALS> pattern
-    var userUBIABC = new Entity("systemuser")
-    {
-        ["bd_bankuserid"] = "UBIABC", // RACFID
-        ["firstname"] = "Alice",
-        ["lastname"] = "Baker-Clark",
-        ["domainname"] = "UBIABC",
-        ["businessunitid"] = xrm.RootBusinessUnit
-    };
-    xrm.CreateUser(admin, userUBIABC, SecurityRoles.CRMFLRådgiver);
-    Log.Information("Created test user: UBIABC (Alice Baker-Clark) with CRMFLRådgiver role");
-
-    var userUBIDEF = new Entity("systemuser")
-    {
-        ["bd_bankuserid"] = "UBIDEF", // RACFID
-        ["firstname"] = "David",
-        ["lastname"] = "Edwards-Frank",
-        ["domainname"] = "UBIDEF",
-        ["businessunitid"] = xrm.RootBusinessUnit
-    };
-    xrm.CreateUser(admin, userUBIDEF, SecurityRoles.CRMFLRådgiver);
-    Log.Information("Created test user: UBIDEF (David Edwards-Frank) with CRMFLRådgiver role");
-
-    // Create team for organizational unit (ORGID) - represents "hovedkontoret"
-    var teamHovedkontoret = new Entity("team")
-    {
-        ["name"] = "Hovedkontoret",
-        ["bd_orgunitid"] = "ORG00001", // ORGID
-        ["businessunitid"] = xrm.RootBusinessUnit
-    };
-    xrm.CreateTeam(admin, teamHovedkontoret, SecurityRoles.CRMFLRådgiver);
-    Log.Information("Created test team: ORG00001 (Hovedkontoret) with CRMFLRådgiver role");
-
-    // Create test contacts (customers)
-    var contact1 = new Entity("contact")
-    {
-        ["firstname"] = "John",
-        ["lastname"] = "Doe",
-        ["emailaddress1"] = "john.doe@example.com"
-    };
-    admin.Create(contact1);
-    Log.Information("Created test contact: John Doe");
-
-    var contact2 = new Entity("contact")
-    {
-        ["firstname"] = "Jane",
-        ["lastname"] = "Smith",
-        ["emailaddress1"] = "jane.smith@example.com"
-    };
-    admin.Create(contact2);
-    Log.Information("Created test contact: Jane Smith");
-
-    var contact3 = new Entity("contact")
-    {
-        ["firstname"] = "Michael",
-        ["lastname"] = "Johnson",
-        ["emailaddress1"] = "michael.johnson@example.com"
-    };
-    admin.Create(contact3);
-    Log.Information("Created test contact: Michael Johnson");
-}
 
 // Make the Program class public for testing
 #pragma warning disable S1118 // Utility classes should not have public constructors

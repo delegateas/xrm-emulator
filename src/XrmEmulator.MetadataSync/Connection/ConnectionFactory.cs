@@ -7,9 +7,14 @@ namespace XrmEmulator.MetadataSync.Connection;
 
 public static class ConnectionFactory
 {
-    public static ServiceClient Create(ConnectionSettings settings)
+    public static async Task<ServiceClient> CreateAsync(ConnectionSettings settings)
     {
         ApplyPerformanceOptimizations();
+
+        if (settings.AuthMode == AuthMode.InteractiveBrowser)
+        {
+            return await CreateWithOAuthAsync(settings);
+        }
 
         var connectionString = settings.AuthMode switch
         {
@@ -19,15 +24,40 @@ public static class ConnectionFactory
             AuthMode.ClientSecret =>
                 $"AuthType=ClientSecret;Url={settings.Url};ClientId={settings.ClientId};ClientSecret={settings.ClientSecret};TenantId={settings.TenantId}",
 
-            AuthMode.InteractiveBrowser =>
-                $"AuthType=OAuth;Url={settings.Url};ClientId={settings.ClientId};RedirectUri={settings.RedirectUri ?? "http://localhost"};LoginPrompt=Auto",
-
             _ => throw new ArgumentOutOfRangeException(nameof(settings.AuthMode), settings.AuthMode, "Unsupported auth mode.")
         };
 
         AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
 
         var client = new ServiceClient(connectionString)
+        {
+            UseWebApi = true,
+            EnableAffinityCookie = false
+        };
+
+        if (!client.IsReady)
+        {
+            throw new InvalidOperationException(
+                $"Failed to connect to Dataverse: {client.LastError}");
+        }
+
+        AnsiConsole.MarkupLine("[green]Connected successfully.[/]");
+        return client;
+    }
+
+    private static async Task<ServiceClient> CreateWithOAuthAsync(ConnectionSettings settings)
+    {
+        var tokenProvider = new OAuthTokenProvider(
+            settings.Url,
+            settings.ClientId ?? ConnectionSettings.MicrosoftPublicClientId);
+
+        await tokenProvider.AuthenticateAsync();
+
+        AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+
+        var client = new ServiceClient(
+            new Uri(settings.Url),
+            tokenProvider.GetTokenAsync)
         {
             UseWebApi = true,
             EnableAffinityCookie = false

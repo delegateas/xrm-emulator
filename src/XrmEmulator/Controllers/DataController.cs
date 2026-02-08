@@ -46,6 +46,7 @@ public sealed class DataController : ControllerBase
             html.AppendLine("</head>");
             html.AppendLine("<body>");
             html.AppendLine("<h1>XRM Emulator Data</h1>");
+            html.AppendLine("<nav><a href='/debug/data'>Data Browser</a> <a href='/debug/setup'>Setup</a></nav>");
             html.AppendLine($"<p>Generated at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</p>");
 
             // Retrieve all entity metadata

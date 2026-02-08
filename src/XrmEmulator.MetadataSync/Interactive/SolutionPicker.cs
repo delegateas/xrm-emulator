@@ -25,9 +25,9 @@ public static class SolutionPicker
                 .PageSize(20)
                 .MoreChoicesText("[grey]Move up and down to reveal more solutions[/]")
                 .AddChoices(solutions)
-                .UseConverter(s => s.DisplayName));
+                .UseConverter(s => Markup.Escape(s.DisplayName)));
 
-        AnsiConsole.MarkupLine($"[grey]Selected: {selected.DisplayName}[/]");
+        AnsiConsole.MarkupLine($"[grey]Selected: {Markup.Escape(selected.FriendlyName)}[/]");
         return selected.SolutionId;
     }
 
