@@ -6,7 +6,7 @@ using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
 
-namespace XrmEmulator.DataverseFakeApi.Controllers;
+namespace XrmEmulator.Controllers;
 
 /// <summary>
 /// Data debugging controller that displays all entities and records in simple HTML format.

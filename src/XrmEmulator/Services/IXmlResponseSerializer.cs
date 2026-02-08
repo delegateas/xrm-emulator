@@ -1,6 +1,6 @@
 using Microsoft.Xrm.Sdk;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Interface for serializing OrganizationResponse objects into SOAP XML.

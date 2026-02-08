@@ -5,9 +5,9 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
-using XrmEmulator.DataverseFakeApi.Services;
+using XrmEmulator.Services;
 
-namespace XrmEmulator.DataverseFakeApi.Controllers;
+namespace XrmEmulator.Controllers;
 
 /// <summary>
 /// Controller that handles SOAP-style requests for ServiceClient compatibility

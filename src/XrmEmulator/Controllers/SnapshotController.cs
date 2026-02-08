@@ -1,8 +1,8 @@
 using DG.Tools.XrmMockup;
 using Microsoft.AspNetCore.Mvc;
-using XrmEmulator.DataverseFakeApi.Services;
+using XrmEmulator.Services;
 
-namespace XrmEmulator.DataverseFakeApi.Controllers;
+namespace XrmEmulator.Controllers;
 
 /// <summary>
 /// Controller for managing XRM Mockup snapshots (export/import XRM state).

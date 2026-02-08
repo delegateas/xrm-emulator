@@ -6,7 +6,7 @@ using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Query;
 using Microsoft.Xrm.Sdk.Metadata;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Provides cached access to SDK types for efficient runtime type resolution.

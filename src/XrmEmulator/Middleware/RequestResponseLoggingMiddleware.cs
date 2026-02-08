@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 
-namespace XrmEmulator.DataverseFakeApi.Middleware;
+namespace XrmEmulator.Middleware;
 
 /// <summary>
 /// Represents request response logging middleware.

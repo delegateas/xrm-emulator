@@ -3,7 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Represents token service.

@@ -1,9 +1,9 @@
 using System.Text.Json;
 using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
-using XrmEmulator.DataverseFakeApi.Services;
+using XrmEmulator.Services;
 
-namespace XrmEmulator.DataverseFakeApi.Controllers;
+namespace XrmEmulator.Controllers;
 
 /// <summary>
 /// Represents token controller.

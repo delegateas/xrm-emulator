@@ -2,7 +2,7 @@ using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Crm.Sdk.Messages;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Implementation of IRequestMapper that maps generic OrganizationRequest to specific typed requests.

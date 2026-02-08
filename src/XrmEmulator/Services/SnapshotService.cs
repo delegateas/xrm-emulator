@@ -1,7 +1,7 @@
 using DG.Tools.XrmMockup;
 using Microsoft.Extensions.Options;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Background service that periodically saves XrmMockup snapshots to disk

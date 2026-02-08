@@ -1,6 +1,6 @@
 using Microsoft.Xrm.Sdk;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Interface for deserializing SOAP XML requests into OrganizationRequest objects.

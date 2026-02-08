@@ -1,4 +1,4 @@
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Defines i token service contract.

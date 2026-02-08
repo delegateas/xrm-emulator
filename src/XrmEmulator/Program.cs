@@ -6,8 +6,8 @@ using Microsoft.OData.ModelBuilder;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
 using Serilog;
-using XrmEmulator.DataverseFakeApi.Middleware;
-using XrmEmulator.DataverseFakeApi.Services;
+using XrmEmulator.Middleware;
+using XrmEmulator.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,8 +23,8 @@ Log.Logger = new LoggerConfiguration()
 
 builder.Host.UseSerilog();
 
-// Add service defaults (this includes health checks, observability, etc.)
-builder.AddServiceDefaults();
+// Add health checks
+builder.Services.AddHealthChecks();
 
 // Add API documentation
 builder.Services.AddEndpointsApiExplorer();
@@ -73,7 +73,7 @@ builder.Services.AddCors(options =>
 });
 
 // Add custom services
-builder.Services.AddSingleton<XrmEmulator.DataverseFakeApi.Services.ITokenService, TokenService>();
+builder.Services.AddSingleton<XrmEmulator.Services.ITokenService, TokenService>();
 
 // Configure snapshot persistence options
 builder.Services.Configure<SnapshotOptions>(options =>
@@ -94,7 +94,7 @@ builder.Services.AddSingleton<XrmMockup365>(provider =>
         BaseCustomApiTypes = [],
         EnableProxyTypes = false,
         IncludeAllWorkflows = false,
-        MetadataDirectoryPath = "MetadataGenerated",
+        MetadataDirectoryPath = builder.Configuration.GetValue<string>("XrmMockup:MetadataDirectoryPath") ?? "Metadata",
         EnablePowerFxFields = false, // Disable PowerFx - it has type incompatibilities with SDK
     };
 
@@ -152,8 +152,9 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-// Map default endpoints (health checks, etc.)
-app.MapDefaultEndpoints();
+// Map health check endpoints
+app.MapHealthChecks("/health");
+app.MapHealthChecks("/alive");
 
 // Redirect root to debug data page
 app.MapGet("/", () => Results.Redirect("/debug/data"));

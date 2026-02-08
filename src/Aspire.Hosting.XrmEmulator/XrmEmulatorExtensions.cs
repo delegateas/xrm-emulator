@@ -7,6 +7,70 @@ namespace Aspire.Hosting;
 /// </summary>
 public static class XrmEmulatorExtensions
 {
+    private const string ContainerImage = "ghcr.io/delegateas/xrm-emulator";
+    private const string DefaultTag = "latest";
+
+    /// <summary>
+    /// Adds an XRM Emulator container resource from the GitHub Container Registry.
+    /// </summary>
+    /// <param name="builder">The distributed application builder.</param>
+    /// <param name="name">The name of the resource.</param>
+    /// <param name="tag">The container image tag. Defaults to "latest".</param>
+    /// <returns>A resource builder for the XRM Emulator container.</returns>
+    public static IResourceBuilder<ContainerResource> AddXrmEmulatorContainer(
+        this IDistributedApplicationBuilder builder,
+        string name,
+        string tag = DefaultTag)
+    {
+        return builder.AddContainer(name, ContainerImage, tag)
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithHttpHealthCheck("/health");
+    }
+
+    /// <summary>
+    /// Mounts a local metadata directory into the XRM Emulator container.
+    /// The metadata folder contains XrmMockup entity metadata files.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator container.</param>
+    /// <param name="metadataPath">The local path to the metadata directory.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ContainerResource> WithMetadataFolder(
+        this IResourceBuilder<ContainerResource> builder,
+        string metadataPath)
+    {
+        return builder.WithBindMount(metadataPath, "/app/Metadata", isReadOnly: true);
+    }
+
+    /// <summary>
+    /// Adds snapshot persistence to the XRM Emulator container.
+    /// This allows the emulator to save and restore its database state across restarts.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator container.</param>
+    /// <param name="saveIntervalSeconds">Interval in seconds between snapshot saves. Defaults to 10 seconds.</param>
+    /// <param name="dataPath">Optional host path for snapshot data. If not specified, uses a named volume.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ContainerResource> WithSnapshotPersistence(
+        this IResourceBuilder<ContainerResource> builder,
+        int saveIntervalSeconds = 10,
+        string? dataPath = null)
+    {
+        builder.WithEnvironment("Snapshot__Enabled", "true");
+        builder.WithEnvironment("Snapshot__SaveIntervalSeconds", saveIntervalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        builder.WithEnvironment("Snapshot__SaveOnShutdown", "true");
+        builder.WithEnvironment("Snapshot__RestoreOnStartup", "true");
+
+        if (!string.IsNullOrEmpty(dataPath))
+        {
+            builder.WithBindMount(dataPath, "/data");
+        }
+        else
+        {
+            builder.WithVolume("xrm-emulator-data", "/data");
+        }
+
+        return builder;
+    }
+
     /// <summary>
     /// Disables IPv6 for the resource to avoid slow localhost connections on Windows.
     /// </summary>
@@ -26,7 +90,7 @@ public static class XrmEmulatorExtensions
     }
 
     /// <summary>
-    /// Adds snapshot persistence to the XRM Emulator.
+    /// Adds snapshot persistence to the XRM Emulator project resource.
     /// This allows the emulator to save and restore its database state across restarts.
     /// </summary>
     /// <param name="builder">The resource builder for the XRM Emulator project.</param>
@@ -38,10 +102,8 @@ public static class XrmEmulatorExtensions
         int saveIntervalSeconds = 10,
         string? dataPath = null)
     {
-        // Configure snapshot options via environment variables
         builder.WithEnvironment("Snapshot__Enabled", "true");
 
-        // Only set custom path if provided
         if (!string.IsNullOrEmpty(dataPath))
         {
             builder.WithEnvironment("Snapshot__FilePath", dataPath);

@@ -10,7 +10,7 @@ using Microsoft.Xrm.Sdk.Query;
 using Microsoft.Xrm.Sdk;
 using System.Globalization;
 
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Implementation of IXmlRequestDeserializer that deserializes SOAP XML into OrganizationRequest objects.

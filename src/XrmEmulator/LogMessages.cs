@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
 
-namespace XrmEmulator.DataverseFakeApi;
+namespace XrmEmulator;
 
 /// <summary>
 /// High-performance logging messages for XrmEmulator project.

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 
-namespace XrmEmulator.DataverseFakeApi.Controllers;
+namespace XrmEmulator.Controllers;
 
 /// <summary>
 /// Represents health controller.

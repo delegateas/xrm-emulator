@@ -1,4 +1,4 @@
-namespace XrmEmulator.DataverseFakeApi.Services;
+namespace XrmEmulator.Services;
 
 /// <summary>
 /// Service for managing XrmMockup snapshot persistence
