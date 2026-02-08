@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.3.0...v1.4.0) (2026-02-08)
+
+
+### Features
+
+* Refactor connection handling and add OAuth support ([6bd38ba](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/commit/6bd38baad43c88c5763894464a88f87b530554bd))
+
 ## [1.3.0](https://github.com/delegateas/ContextAnd.Aspire.Hosting.Dataverse/compare/v1.2.0...v1.3.0) (2026-02-08)
 
 
