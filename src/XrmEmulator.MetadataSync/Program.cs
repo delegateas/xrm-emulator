@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Metadata;
 using Spectre.Console;
+using Microsoft.Extensions.Configuration;
 using XrmEmulator.MetadataSync.Connection;
 using XrmEmulator.MetadataSync.Interactive;
 using XrmEmulator.MetadataSync.Models;
@@ -24,20 +25,22 @@ try
         .AddCommandLine(args)
         .Build();
 
+    var noCache = configuration.GetValue<bool>("no-cache");
+
     // 2. Run ConnectionWizard to get connection settings
-    var connectionSettings = await ConnectionWizard.RunAsync(configuration);
+    var connectionSettings = await ConnectionWizard.RunAsync(configuration, noCache);
 
     // 3. Create ServiceClient via ConnectionFactory
     using var client = await ConnectionFactory.CreateAsync(connectionSettings);
 
     // 4. Run SolutionPicker to select solution
-    var solutionId = SolutionPicker.Run(client);
+    var (solutionId, solutionUniqueName) = SolutionPicker.Run(client);
 
     // 5. Run EntityPicker for entity selection
     var selectedEntities = EntityPicker.Run(client, solutionId);
 
     // 6. Run MetadataScopePicker for scope + output directory
-    var syncOptions = MetadataScopePicker.Run(solutionId, selectedEntities);
+    var syncOptions = MetadataScopePicker.Run(solutionId, solutionUniqueName, selectedEntities);
 
     // 7. Confirm
     AnsiConsole.WriteLine();

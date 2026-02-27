@@ -14,6 +14,7 @@ public partial class OAuthTokenProvider
 {
     private readonly string _dataverseUrl;
     private readonly string _clientId;
+    private readonly bool _noCache;
 
     private string? _authorizeEndpoint;
     private string? _tokenEndpoint;
@@ -21,16 +22,23 @@ public partial class OAuthTokenProvider
     private string? _refreshToken;
     private DateTimeOffset _expiresAt;
 
-    public OAuthTokenProvider(string dataverseUrl, string clientId)
+    public OAuthTokenProvider(string dataverseUrl, string clientId, bool noCache = false)
     {
         _dataverseUrl = dataverseUrl.TrimEnd('/');
         _clientId = clientId;
+        _noCache = noCache;
     }
 
     public async Task AuthenticateAsync()
     {
+        if (_noCache)
+        {
+            TokenCache.Clear(_dataverseUrl, _clientId);
+            AnsiConsole.MarkupLine("[grey]Cache disabled (--no-cache), forcing fresh sign-in...[/]");
+        }
+
         // Try cached refresh token first
-        var cached = TokenCache.Load(_dataverseUrl, _clientId);
+        var cached = _noCache ? null : TokenCache.Load(_dataverseUrl, _clientId);
         if (cached != null)
         {
             AnsiConsole.MarkupLine("[grey]Found cached credentials, attempting silent refresh...[/]");

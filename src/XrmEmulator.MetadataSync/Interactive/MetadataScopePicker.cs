@@ -12,7 +12,7 @@ public static class MetadataScopePicker
     private const string GlobalOptionSetsOption = "Global Option Sets";
     private const string CurrenciesOrgOption = "Currencies & Organization";
 
-    public static SyncOptions Run(Guid solutionId, HashSet<string> selectedEntities)
+    public static SyncOptions Run(Guid solutionId, string solutionUniqueName, HashSet<string> selectedEntities)
     {
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[bold blue]Metadata Scope[/]").LeftJustified());
@@ -51,6 +51,7 @@ public static class MetadataScopePicker
         return new SyncOptions
         {
             SolutionId = solutionId,
+            SolutionUniqueName = solutionUniqueName,
             SelectedEntities = selectedEntities,
             OutputDirectory = outputDirectory,
             IncludePlugins = selectedSet.Contains(PluginsOption),

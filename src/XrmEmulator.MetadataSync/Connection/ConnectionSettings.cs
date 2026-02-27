@@ -22,4 +22,5 @@ public record ConnectionSettings
     public string? ClientSecret { get; init; }
     public string? ConnectionString { get; init; }
     public required AuthMode AuthMode { get; init; }
+    public bool NoCache { get; init; }
 }

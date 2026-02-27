@@ -49,7 +49,8 @@ public static class ConnectionFactory
     {
         var tokenProvider = new OAuthTokenProvider(
             settings.Url,
-            settings.ClientId ?? ConnectionSettings.MicrosoftPublicClientId);
+            settings.ClientId ?? ConnectionSettings.MicrosoftPublicClientId,
+            settings.NoCache);
 
         await tokenProvider.AuthenticateAsync();
 

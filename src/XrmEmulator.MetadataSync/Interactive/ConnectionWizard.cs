@@ -6,7 +6,7 @@ namespace XrmEmulator.MetadataSync.Interactive;
 
 public static class ConnectionWizard
 {
-    public static async Task<ConnectionSettings> RunAsync(IConfiguration configuration)
+    public static async Task<ConnectionSettings> RunAsync(IConfiguration configuration, bool noCache = false)
     {
         // Check if connection settings are already provided via configuration
         var configUrl = configuration["Url"] ?? configuration["DATAVERSE_URL"];
@@ -36,7 +36,7 @@ public static class ConnectionWizard
         {
             AuthMode.ConnectionString => PromptConnectionString(),
             AuthMode.ClientSecret => PromptClientSecret(configUrl, configClientId, configClientSecret, configTenantId),
-            AuthMode.InteractiveBrowser => await PromptInteractiveBrowserAsync(configUrl, configClientId),
+            AuthMode.InteractiveBrowser => await PromptInteractiveBrowserAsync(configUrl, configClientId, noCache),
             _ => throw new ArgumentOutOfRangeException(nameof(authMode), authMode, null)
         };
     }
@@ -102,7 +102,7 @@ public static class ConnectionWizard
         };
     }
 
-    private static async Task<ConnectionSettings> PromptInteractiveBrowserAsync(string? configUrl, string? configClientId)
+    private static async Task<ConnectionSettings> PromptInteractiveBrowserAsync(string? configUrl, string? configClientId, bool noCache = false)
     {
         var url = configUrl;
 
@@ -127,7 +127,8 @@ public static class ConnectionWizard
         {
             Url = url,
             ClientId = clientId,
-            AuthMode = AuthMode.InteractiveBrowser
+            AuthMode = AuthMode.InteractiveBrowser,
+            NoCache = noCache
         };
     }
 

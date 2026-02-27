@@ -6,7 +6,7 @@ namespace XrmEmulator.MetadataSync.Interactive;
 
 public static class SolutionPicker
 {
-    public static Guid Run(IOrganizationService service)
+    public static (Guid SolutionId, string UniqueName) Run(IOrganizationService service)
     {
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[bold blue]Solution Selection[/]").LeftJustified());
@@ -28,7 +28,7 @@ public static class SolutionPicker
                 .UseConverter(s => Markup.Escape(s.DisplayName)));
 
         AnsiConsole.MarkupLine($"[grey]Selected: {Markup.Escape(selected.FriendlyName)}[/]");
-        return selected.SolutionId;
+        return (selected.SolutionId, selected.UniqueName);
     }
 
     private static List<SolutionInfo> RetrieveSolutions(IOrganizationService service)

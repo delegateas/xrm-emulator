@@ -67,6 +67,9 @@ public static class MetadataSerializer
             // Generate TypeDeclarations.cs with security role GUID constants
             GenerateTypeDeclarations(securityRoles, outputDir);
         }
+
+        // Generate agent-friendly markdown model
+        MarkdownGenerator.Generate(options, entityMetadata, defaultStateStatus, plugins, optionSets, securityRoles);
     }
 
     private static void SerializeToFile<T>(T obj, string filePath)
