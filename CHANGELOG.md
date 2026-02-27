@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/delegateas/xrm-emulator/compare/v1.6.0...v1.6.1) (2026-02-27)
+
+
+### Bug Fixes
+
+* added no-cache support and agentic model generator ([dcb4648](https://github.com/delegateas/xrm-emulator/commit/dcb46480140d7e28e907aa95ab2dbb319a7403ff))
+
 ## [1.6.0](https://github.com/delegateas/xrm-emulator/compare/v1.5.0...v1.6.0) (2026-02-09)
 
 
