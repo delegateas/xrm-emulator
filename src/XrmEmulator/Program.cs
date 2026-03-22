@@ -89,6 +89,28 @@ builder.Services.Configure<SnapshotOptions>(options =>
     options.RestoreOnStartup = builder.Configuration.GetValue<bool>("Snapshot:RestoreOnStartup", true);
 });
 
+// Determine XrmMockup metadata directory path
+// Priority: 1) Explicit XrmMockup:MetadataDirectoryPath, 2) Build combined from SolutionExports, 3) Default "Metadata"
+var explicitMetadataPath = builder.Configuration.GetValue<string>("XrmMockup:MetadataDirectoryPath");
+var solutionExportsPathForMetadata = builder.Configuration.GetValue<string>("SolutionExports:Path");
+string metadataDirectoryPath;
+
+if (!string.IsNullOrEmpty(explicitMetadataPath))
+{
+    metadataDirectoryPath = explicitMetadataPath;
+    Log.Information("XrmMockup: Using explicit metadata path: {Path}", metadataDirectoryPath);
+}
+else if (!string.IsNullOrEmpty(solutionExportsPathForMetadata))
+{
+    Log.Information("XrmMockup: Building combined metadata from solution exports at {Path}", solutionExportsPathForMetadata);
+    metadataDirectoryPath = MetadataFolderBuilder.BuildCombinedMetadataFolder(solutionExportsPathForMetadata);
+    Log.Information("XrmMockup: Combined metadata written to {Path}", metadataDirectoryPath);
+}
+else
+{
+    metadataDirectoryPath = "Metadata";
+}
+
 // Register XrmMockup365 instance
 builder.Services.AddSingleton<XrmMockup365>(provider =>
 {
@@ -97,8 +119,8 @@ builder.Services.AddSingleton<XrmMockup365>(provider =>
         BasePluginTypes = [],
         BaseCustomApiTypes = [],
         EnableProxyTypes = false,
-        IncludeAllWorkflows = false,
-        MetadataDirectoryPath = builder.Configuration.GetValue<string>("XrmMockup:MetadataDirectoryPath") ?? "Metadata",
+        IncludeAllWorkflows = true,
+        MetadataDirectoryPath = metadataDirectoryPath,
         EnablePowerFxFields = false, // Disable PowerFx - it has type incompatibilities with SDK
     };
 
@@ -122,6 +144,14 @@ builder.Services.AddHostedService<SnapshotService>(provider =>
 builder.Services.AddScoped<IRequestMapper, RequestMapper>();
 builder.Services.AddScoped<IXmlRequestDeserializer, XmlRequestDeserializer>();
 builder.Services.AddScoped<IXmlResponseSerializer, XmlResponseSerializer>();
+
+// Register solution metadata service and per-app organization service resolver
+var solutionExportsPath = builder.Configuration.GetValue<string>("SolutionExports:Path");
+builder.Services.AddSingleton(new SolutionMetadataService(solutionExportsPath));
+builder.Services.AddSingleton(provider =>
+    new OrganizationServiceResolver(
+        provider.GetRequiredService<IOrganizationServiceAsync>(),
+        provider.GetService<XrmMockup365>()));
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
@@ -156,6 +186,9 @@ if (app.Environment.IsDevelopment())
 
 // Enable CORS
 app.UseCors();
+
+// Serve static files before any other middleware to avoid route conflicts
+app.UseStaticFiles();
 
 // Add comprehensive request/response logging middleware
 app.UseMiddleware<RequestResponseLoggingMiddleware>();

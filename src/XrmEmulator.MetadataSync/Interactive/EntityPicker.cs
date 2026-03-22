@@ -10,6 +10,7 @@ public static class EntityPicker
     {
         "systemuser",
         "team",
+        "teammembership",
         "businessunit",
         "organization",
         "transactioncurrency",

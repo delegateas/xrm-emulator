@@ -1,0 +1,23 @@
+namespace XrmEmulator.MetadataSync.Commit;
+
+public enum CommitItemType
+{
+    SavedQuery,
+    SystemForm,
+    SiteMap,
+    Entity,
+    IconUpload,
+    IconSet,
+    AppModuleEntity,
+    AppModuleView,
+    AppModuleForm,
+    BusinessRule,
+    Delete,
+    Deprecate,
+    NewAttribute,
+    WebResourceUpload,
+    CommandBar,
+    RibbonWorkbench
+}
+
+public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

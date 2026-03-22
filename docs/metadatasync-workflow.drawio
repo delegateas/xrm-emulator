@@ -1,0 +1,246 @@
+<mxfile host="65bd71144e">
+    <diagram name="MetadataSync Write-Back Workflow" id="workflow">
+        <mxGraphModel dx="1538" dy="818" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1100" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="MetadataSync Write-Back Workflow" style="text;html=1;fontSize=20;fontStyle=1;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="20" width="400" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_human" value="Human" style="shape=swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="80" width="300" height="980" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_agent" value="Agent" style="shape=swimlane;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="360" y="80" width="300" height="980" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_tool" value="MetadataSync Tool" style="shape=swimlane;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="80" width="320" height="980" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_crm" value="Dataverse CRM" style="shape=swimlane;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="1020" y="80" width="260" height="980" as="geometry"/>
+                </mxCell>
+                <mxCell id="phase1" value="Phase 1: Initial Sync" style="text;html=1;fontSize=12;fontStyle=5;fillColor=#e6e6e6;rounded=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="120" width="1240" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="h1" value="Runs&#xa;MetadataSync" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="90" y="160" width="180" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t1" value="Connects to CRM&#xa;Selects solution&#xa;Exports &amp; unpacks&#xa;Writes connection_metadata.json" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="155" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="c1" value="ExportSolution&#xa;Returns .zip" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="1" vertex="1">
+                    <mxGeometry x="1050" y="160" width="200" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_h1_t1" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="h1" target="t1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t1_c1" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t1" target="c1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="snapshot" value="Snapshot (read-only)&#xa;SolutionExport/{solution}/&#xa;+ connection_metadata.json" style="shape=note;fillColor=#fff2cc;strokeColor=#d6b656;size=15;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="235" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t1_snap" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t1" target="snapshot" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="phase2" value="Phase 2: Agent Checkout &amp; Edit" style="text;html=1;fontSize=12;fontStyle=5;fillColor=#e6e6e6;rounded=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="315" width="1240" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="a1" value="Identifies component&#xa;to modify (view,&#xa;sitemap, entity, icon)" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="355" width="180" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="a2" value="Calls checkout:&#xa;views &lt;id&gt;&#xa;sitemap &lt;name&gt;&#xa;entity &lt;name&gt;" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="425" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="t2" value="Copies file from snapshot&#xa;to _pending/{relative-path}&#xa;(checkout for edit)" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="425" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="a3" value="Edits the file&#xa;in _pending/&#xa;(fetchxml, layoutxml, etc.)" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="510" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="pending" value="_pending/&#xa;Entities/.../SavedQueries/{id}.xml&#xa;AppModuleSiteMaps/...&#xa;Entities/.../Entity.xml" style="shape=note;fillColor=#fff2cc;strokeColor=#d6b656;size=15;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="505" width="260" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_a1_a2" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="a1" target="a2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_a2_t2" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="a2" target="t2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t2_a3" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t2" target="a3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_a3_pend" style="edgeStyle=orthogonalEdgeStyle;dashed=1;" parent="1" source="a3" target="pending" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="phase2b" value="Phase 2b: Icon Staging (new content, not checkout)" style="text;html=1;fontSize=12;fontStyle=5;fillColor=#e6e6e6;rounded=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="595" width="1240" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="a_icon1" value="Calls:&#xa;icon new &lt;name&gt; &lt;svg&gt;&#xa;  [--entity &lt;ent&gt;]&#xa;icon set &lt;ent&gt; &lt;wr&gt;" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="635" width="180" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_icon1" value="icon new: copies SVG +&#xa;writes JSON marker to&#xa;_pending/Icons/&#xa;icon set: writes JSON marker only" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="630" width="260" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="pending_icon" value="_pending/Icons/&#xa;kf_-icons-partner.svg.json&#xa;kf_-icons-partner.svg.svg&#xa;kf_contact.icon.json" style="shape=note;fillColor=#fff2cc;strokeColor=#d6b656;size=15;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="720" width="260" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_a_icon1_t_icon1" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="a_icon1" target="t_icon1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t_icon1_pend" style="edgeStyle=orthogonalEdgeStyle;dashed=1;" parent="1" source="t_icon1" target="pending_icon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="phase3" value="Phase 3: Human Commit (Write + Verify)" style="text;html=1;fontSize=12;fontStyle=5;fillColor=#e6e6e6;rounded=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="805" width="1240" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="h2" value="Runs&#xa;MetadataSync commit" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="90" y="845" width="180" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t3" value="Shows interactive list&#xa;of ALL _pending/ changes&#xa;(views, sitemaps, entities, icons)&#xa;Human selects which to push" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="840" width="260" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="h3" value="Reviews &amp; approves&#xa;changes in list" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="90" y="920" width="180" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t4" value="Updates via API:&#xa;SavedQuery, SiteMap, Entity&#xa;WebResource upload + IconVectorName&#xa;PublishAllXml" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="915" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="c2" value="Components updated&#xa;Customizations&#xa;published" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="1" vertex="1">
+                    <mxGeometry x="1050" y="915" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="t5" value="Re-exports &amp; unpacks solution&#xa;Verifies round-trip for XML items&#xa;Archives all to _committed/" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+                    <mxGeometry x="710" y="990" width="260" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_h2_t3" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="h2" target="t3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t3_h3" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t3" target="h3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_h3_t4" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="h3" target="t4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t4_c2" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t4" target="c2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_t4_t5" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="t4" target="t5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram name="Capabilities Overview" id="capabilities">
+        <mxGraphModel dx="1538" dy="818" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="cap_title" value="MetadataSync — What You Can Do" style="text;html=1;fontSize=22;fontStyle=1;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="20" width="500" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="hub" value="MetadataSync&#xa;CLI Tool" style="ellipse;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=16;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="370" width="160" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="crm" value="Dataverse&#xa;CRM" style="shape=cloud;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=14;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="510" y="100" width="180" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_crm" value="connect &amp;&#xa;authenticate" style="edgeStyle=orthogonalEdgeStyle;fontStyle=0;fontSize=10;" parent="1" source="hub" target="crm" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_sync" value="Sync / Export&#xa;(read-only)" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="100" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_sync_detail" value="- Full solution export &amp; unpack&#xa;- Markdown model generation&#xa;- Entity, view, sitemap, plugin, role docs&#xa;- Git-tracked snapshots" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="170" width="240" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_sync" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_sync" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_views" value="Views&#xa;(SavedQueries)" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="310" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_views_detail" value="- Checkout by GUID&#xa;- Edit fetchxml, layoutxml&#xa;- Add/remove/reorder columns&#xa;- Change filters &amp; sort" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="370" width="210" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_views" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_views" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_sitemap" value="Sitemaps" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="480" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_sitemap_detail" value="- Checkout by app module name&#xa;- Add/remove/reorder Areas,&#xa;  Groups, SubAreas&#xa;- Restructure navigation" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="540" width="220" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_sitemap" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_sitemap" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_entity" value="Entity Fields" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="650" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_entity_detail" value="- Checkout by logical name&#xa;- Edit display names, descriptions&#xa;- Change required level, max length&#xa;- Diff against snapshot on commit" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="710" width="230" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_entity" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_entity" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_icon" value="Entity Icons" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="310" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_icon_detail" value="- icon new: upload SVG web resource&#xa;  + optionally assign to entity&#xa;- icon set: assign existing web&#xa;  resource as entity icon&#xa;- Replaces default puzzle piece icon" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="950" y="370" width="230" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_icon" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_icon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_commit" value="commit" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="510" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_commit_detail" value="- Interactive multi-select prompt&#xa;- Pushes all selected changes to CRM&#xa;- PublishAllXml&#xa;- Re-exports solution snapshot&#xa;- Verifies round-trip, archives to&#xa;  _committed/" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="950" y="570" width="240" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_commit" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_commit" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_safety" value="Safety &amp; Git" style="rounded=1;fillColor=#e6e6e6;strokeColor=#999999;fontStyle=1;fontSize=13;whiteSpace=wrap;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="700" width="170" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cap_safety_detail" value="- SolutionExport/ is read-only (hooks)&#xa;- _pending/ write-protected from&#xa;  direct creation (hooks)&#xa;- git-init: track snapshots in git&#xa;- Auto git commit after re-export" style="text;html=0;fontSize=11;align=left;verticalAlign=top;" parent="1" vertex="1">
+                    <mxGeometry x="950" y="760" width="240" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_hub_safety" style="edgeStyle=orthogonalEdgeStyle;" parent="1" source="hub" target="cap_safety" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_title" value="Legend" style="text;html=1;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="560" width="60" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_read" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="585" width="20" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_read_label" value="Read-only" style="text;html=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="475" y="582" width="60" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_checkout" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="605" width="20" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_checkout_label" value="Checkout/Edit" style="text;html=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="475" y="602" width="80" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_stage" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="625" width="20" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_stage_label" value="Stage (new content)" style="text;html=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="475" y="622" width="110" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_action" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="645" width="20" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_action_label" value="Push to CRM" style="text;html=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="475" y="642" width="80" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="workflow_note" value="Workflow: checkout/stage  →  edit _pending/  →  commit  →  _committed/" style="text;html=1;fontSize=13;fontStyle=2;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="830" width="600" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

@@ -156,4 +156,32 @@ public static class XrmEmulatorExtensions
         var key = File.ReadAllText(licenseFilePath).Trim();
         return builder.WithEnvironment("XRMEMULATOR_LICENSE", key);
     }
+
+    /// <summary>
+    /// Mounts a local solution exports directory into the XRM Emulator container.
+    /// The solution exports folder contains Dataverse solution packages with AppModules, SiteMaps, Entities, Views, and Forms.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator container.</param>
+    /// <param name="solutionExportsPath">The local path to the solution exports directory.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ContainerResource> WithSolutionExports(
+        this IResourceBuilder<ContainerResource> builder,
+        string solutionExportsPath)
+    {
+        return builder.WithBindMount(solutionExportsPath, "/app/SolutionExports", isReadOnly: true);
+    }
+
+    /// <summary>
+    /// Configures solution exports path for the XRM Emulator project resource.
+    /// The solution exports folder contains Dataverse solution packages with AppModules, SiteMaps, Entities, Views, and Forms.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator project.</param>
+    /// <param name="solutionExportsPath">The local path to the solution exports directory.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ProjectResource> WithSolutionExports(
+        this IResourceBuilder<ProjectResource> builder,
+        string solutionExportsPath)
+    {
+        return builder.WithEnvironment("SolutionExports__Path", solutionExportsPath);
+    }
 }

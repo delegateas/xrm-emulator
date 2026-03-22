@@ -22,6 +22,7 @@ public static class MarkdownGenerator
         Directory.CreateDirectory(entitiesDir);
 
         GenerateSolutionOverview(entityMetadata, modelDir, options.SolutionUniqueName);
+        GenerateEntitiesOverview(entityMetadata, modelDir);
 
         foreach (var (logicalName, metadata) in entityMetadata)
         {
@@ -58,6 +59,29 @@ public static class MarkdownGenerator
         }
 
         File.WriteAllText(Path.Combine(modelDir, "solution.md"), sb.ToString());
+    }
+
+    private static void GenerateEntitiesOverview(
+        Dictionary<string, EntityMetadata> entityMetadata,
+        string modelDir)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# Entities");
+        sb.AppendLine();
+        sb.AppendLine("| Logical Name | Display Name | ObjectTypeCode | Primary ID | Primary Name | Custom |");
+        sb.AppendLine("|---|---|---|---|---|---|");
+
+        foreach (var (logicalName, meta) in entityMetadata.OrderBy(e => e.Key))
+        {
+            var displayName = GetLabel(meta.DisplayName);
+            var otc = meta.ObjectTypeCode?.ToString() ?? "";
+            var primaryId = meta.PrimaryIdAttribute ?? "";
+            var primaryName = meta.PrimaryNameAttribute ?? "";
+            var isCustom = meta.IsCustomEntity == true ? "Yes" : "No";
+            sb.AppendLine($"| {logicalName} | {displayName} | {otc} | {primaryId} | {primaryName} | {isCustom} |");
+        }
+
+        File.WriteAllText(Path.Combine(modelDir, "entities.md"), sb.ToString());
     }
 
     private static void GenerateEntityFile(

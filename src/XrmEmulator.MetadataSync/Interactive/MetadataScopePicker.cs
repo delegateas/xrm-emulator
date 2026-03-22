@@ -11,6 +11,8 @@ public static class MetadataScopePicker
     private const string SecurityRolesOption = "Security Roles";
     private const string GlobalOptionSetsOption = "Global Option Sets";
     private const string CurrenciesOrgOption = "Currencies & Organization";
+    private const string SolutionExportOption = "Solution Export & Unpack";
+    private const string RibbonExportOption = "Entity Ribbon XML";
 
     public static SyncOptions Run(Guid solutionId, string solutionUniqueName, HashSet<string> selectedEntities)
     {
@@ -18,7 +20,9 @@ public static class MetadataScopePicker
         AnsiConsole.Write(new Rule("[bold blue]Metadata Scope[/]").LeftJustified());
         AnsiConsole.WriteLine();
 
-        var choices = new[]
+        var isDefaultSolution = solutionUniqueName.Equals("Default", StringComparison.OrdinalIgnoreCase);
+
+        var choices = new List<string>
         {
             EntityMetadataOption,
             PluginsOption,
@@ -27,6 +31,16 @@ public static class MetadataScopePicker
             GlobalOptionSetsOption,
             CurrenciesOrgOption
         };
+
+        if (!isDefaultSolution)
+        {
+            choices.Add(SolutionExportOption);
+            choices.Add(RibbonExportOption);
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[grey]Solution Export is not available for the Default solution.[/]");
+        }
 
         var prompt = new MultiSelectionPrompt<string>()
             .Title("Select [green]metadata scope[/] to sync:")
@@ -58,7 +72,9 @@ public static class MetadataScopePicker
             IncludeWorkflows = selectedSet.Contains(WorkflowsOption),
             IncludeSecurityRoles = selectedSet.Contains(SecurityRolesOption),
             IncludeOptionSets = selectedSet.Contains(GlobalOptionSetsOption),
-            IncludeOrganizationData = selectedSet.Contains(CurrenciesOrgOption)
+            IncludeOrganizationData = selectedSet.Contains(CurrenciesOrgOption),
+            IncludeSolutionExport = selectedSet.Contains(SolutionExportOption),
+            IncludeRibbonExport = selectedSet.Contains(RibbonExportOption)
         };
     }
 }

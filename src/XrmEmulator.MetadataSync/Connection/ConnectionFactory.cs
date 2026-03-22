@@ -32,7 +32,9 @@ public static class ConnectionFactory
         var client = new ServiceClient(connectionString)
         {
             UseWebApi = true,
-            EnableAffinityCookie = false
+            EnableAffinityCookie = false,
+            MaxRetryCount = 3,
+            RetryPauseTime = TimeSpan.FromSeconds(2)
         };
 
         if (!client.IsReady)
@@ -61,7 +63,9 @@ public static class ConnectionFactory
             tokenProvider.GetTokenAsync)
         {
             UseWebApi = true,
-            EnableAffinityCookie = false
+            EnableAffinityCookie = false,
+            MaxRetryCount = 3,
+            RetryPauseTime = TimeSpan.FromSeconds(2)
         };
 
         if (!client.IsReady)
@@ -80,6 +84,7 @@ public static class ConnectionFactory
         System.Net.ServicePointManager.Expect100Continue = false;
         System.Net.ServicePointManager.UseNagleAlgorithm = false;
         ThreadPool.SetMinThreads(100, 100);
+        ServiceClient.MaxConnectionTimeout = TimeSpan.FromMinutes(10);
     }
 }
 

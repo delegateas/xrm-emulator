@@ -1,5 +1,27 @@
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/workspaces/xrm-emulator/src/XrmEmulator.MetadataSync/bin/hooks/XrmEmulator.MetadataSync hook guard-readonly"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/workspaces/xrm-emulator/src/XrmEmulator.MetadataSync/bin/hooks/XrmEmulator.MetadataSync hook guard-pending"
+          }
+        ]
+      }
+    ]
   }
 }

@@ -11,4 +11,6 @@ public record SyncOptions
     public bool IncludeSecurityRoles { get; init; }
     public bool IncludeOptionSets { get; init; }
     public bool IncludeOrganizationData { get; init; }
+    public bool IncludeSolutionExport { get; init; }
+    public bool IncludeRibbonExport { get; init; }
 }
