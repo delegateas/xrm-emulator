@@ -135,6 +135,34 @@ try
     {
         HandleDeprecateCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("plugin", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePluginCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("relationship", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleRelationshipCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("import", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleImportCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pcf", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePcfCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("security-role", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleSecurityRoleCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("optionset", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleOptionSetCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("query", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleQueryCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pending", StringComparison.OrdinalIgnoreCase))
     {
         HandlePendingCommand();
@@ -1779,6 +1807,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]commandbar[/] <app> [bold]edit[/] <name>                       Edit/customize an existing command bar button");
     AnsiConsole.MarkupLine("  [bold]ribbonworkbench hide[/] <entity> <button-id>            Hide a ribbon button via HideCustomAction");
     AnsiConsole.MarkupLine("  [bold]deprecate[/] <entity> <attribute>                       Deprecate a field (prefix display name with ZZ)");
+    AnsiConsole.MarkupLine("  [bold]optionset add-value[/] <name> <label> [--value <int>]  Add a value to a global option set");
     AnsiConsole.MarkupLine("  [bold]commit[/]                                             Push pending changes to CRM");
     AnsiConsole.MarkupLine("  [bold]git-init[/]                                           Initialize git tracking in SolutionExport/");
     AnsiConsole.WriteLine();
@@ -2358,7 +2387,7 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
     {
         AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync entity attribute add <entity> <attribute-name> --type <type> [[--target <entity>]] [[--display-name <name>]]");
         AnsiConsole.MarkupLine("");
-        AnsiConsole.MarkupLine("[yellow]Types:[/] lookup, string, memo, int, decimal, boolean, datetime");
+        AnsiConsole.MarkupLine("[yellow]Types:[/] lookup, string, memo, int, decimal, boolean, datetime, image");
         AnsiConsole.MarkupLine("[grey]For lookups, --target is required.[/]");
         AnsiConsole.MarkupLine("[grey]Example: entity attribute add lead cr_partner --type lookup --target account --display-name \"Partner\"[/]");
         Environment.Exit(1);
@@ -2375,7 +2404,7 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
 
     if (string.IsNullOrEmpty(attributeType))
     {
-        AnsiConsole.MarkupLine("[red]--type is required.[/] Options: lookup, string, memo, int, decimal, boolean, datetime");
+        AnsiConsole.MarkupLine("[red]--type is required.[/] Options: lookup, string, memo, int, decimal, boolean, datetime, image");
         Environment.Exit(1);
     }
 
@@ -2461,6 +2490,1119 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
     AnsiConsole.MarkupLine($"  File:        {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// query <table> [--select col1,col2] [--filter field=value] [--top N]
+// ──────────────────────────────────────────────────────────────
+static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 2)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync query <table> [--select col1,col2] [--filter field=value] [--top N] [--fetchxml \"<fetch>...\"]");
+        AnsiConsole.MarkupLine("[grey]Examples:[/]");
+        AnsiConsole.MarkupLine("[grey]  query kf_partnerrelation --select kf_name,kf_account,kf_contact --top 10[/]");
+        AnsiConsole.MarkupLine("[grey]  query contact --filter firstname=Poul --select firstname,lastname,emailaddress1[/]");
+        AnsiConsole.MarkupLine("[grey]  query kf_partnerrelation --fetchxml \"<fetch top='10'><entity name='kf_partnerrelation'><all-attributes/></entity></fetch>\"[/]");
+        Environment.Exit(1);
+    }
+
+    var table = positionalArgs[1].ToLowerInvariant();
+    var selectArg = ParseNamedArg(allArgs, "--select");
+    var filterArgs = ParseAllNamedArgs(allArgs, "--filter");
+    var topArg = ParseNamedArg(allArgs, "--top");
+    var fetchXml = ParseNamedArg(allArgs, "--fetchxml");
+    var impersonateArg = ParseNamedArg(allArgs, "--impersonate");
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    // Impersonation: resolve user and set CallerId
+    if (!string.IsNullOrEmpty(impersonateArg))
+    {
+        Guid callerId;
+        if (Guid.TryParse(impersonateArg, out callerId))
+        {
+            // Direct GUID
+        }
+        else
+        {
+            // Resolve by name (applicationuser fullname or systemuser fullname)
+            var userQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("systemuser")
+            {
+                ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("fullname"),
+                TopCount = 1,
+                Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+                {
+                    Conditions =
+                    {
+                        new Microsoft.Xrm.Sdk.Query.ConditionExpression("fullname", Microsoft.Xrm.Sdk.Query.ConditionOperator.Like, $"%{impersonateArg}%")
+                    }
+                }
+            };
+            var userResults = client.RetrieveMultiple(userQuery);
+            if (userResults.Entities.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[red]User not found:[/] {impersonateArg}");
+                Environment.Exit(1);
+            }
+            callerId = userResults.Entities[0].Id;
+            var resolvedName = userResults.Entities[0].GetAttributeValue<string>("fullname");
+            AnsiConsole.MarkupLine($"[grey]Resolved user: {resolvedName} ({callerId})[/]");
+        }
+        client.CallerId = callerId;
+        AnsiConsole.MarkupLine($"[yellow]Impersonating:[/] {callerId}");
+    }
+
+    Microsoft.Xrm.Sdk.EntityCollection results;
+
+    if (!string.IsNullOrEmpty(fetchXml))
+    {
+        // FetchXML mode
+        var fetchReq = new Microsoft.Xrm.Sdk.Query.FetchExpression(fetchXml);
+        results = client.RetrieveMultiple(fetchReq);
+    }
+    else
+    {
+        // QueryExpression mode
+        var columns = string.IsNullOrEmpty(selectArg)
+            ? new Microsoft.Xrm.Sdk.Query.ColumnSet(true)
+            : new Microsoft.Xrm.Sdk.Query.ColumnSet(selectArg.Split(',').Select(c => c.Trim()).ToArray());
+
+        var query = new Microsoft.Xrm.Sdk.Query.QueryExpression(table)
+        {
+            ColumnSet = columns,
+            TopCount = topArg != null ? int.Parse(topArg) : 50
+        };
+
+        if (filterArgs.Count > 0)
+        {
+            foreach (var filter in filterArgs)
+            {
+                var parts = filter.Split('=', 2);
+                if (parts.Length == 2)
+                {
+                    query.Criteria.Conditions.Add(
+                        new Microsoft.Xrm.Sdk.Query.ConditionExpression(parts[0].Trim(), Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, parts[1].Trim()));
+                }
+            }
+        }
+
+        results = client.RetrieveMultiple(query);
+    }
+
+    AnsiConsole.MarkupLine($"[green]Returned {results.Entities.Count} record(s)[/]");
+    AnsiConsole.WriteLine();
+
+    if (results.Entities.Count == 0)
+        return;
+
+    // Collect all column names across all results
+    var allColumns = results.Entities
+        .SelectMany(e => e.Attributes.Keys)
+        .Distinct()
+        .OrderBy(c => c)
+        .ToList();
+
+    // Output as JSON for easy parsing
+    var output = new List<Dictionary<string, object?>>();
+    foreach (var entity in results.Entities)
+    {
+        var row = new Dictionary<string, object?> { ["id"] = entity.Id.ToString() };
+        foreach (var col in allColumns)
+        {
+            if (!entity.Contains(col)) continue;
+            var val = entity[col];
+            row[col] = val switch
+            {
+                EntityReference er => $"{er.LogicalName}:{er.Id} ({er.Name})",
+                OptionSetValue osv => osv.Value,
+                Money m => m.Value,
+                AliasedValue av => av.Value?.ToString(),
+                OptionSetValueCollection osc => string.Join(",", osc.Select(o => o.Value)),
+                _ => val?.ToString()
+            };
+        }
+        output.Add(row);
+    }
+
+    var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
+    AnsiConsole.WriteLine(json);
+}
+
+/// <summary>Parse all occurrences of a named argument (e.g. multiple --filter).</summary>
+static List<string> ParseAllNamedArgs(string[] args, string name)
+{
+    var values = new List<string>();
+    for (int i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+            values.Add(args[i + 1]);
+    }
+    return values;
+}
+
+// ──────────────────────────────────────────────────────────────
+// security-role update|add — manage security role privileges
+// ──────────────────────────────────────────────────────────────
+static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 2)
+    {
+        PrintSecurityRoleUsage();
+        Environment.Exit(1);
+    }
+
+    var subCommand = positionalArgs[1].ToLowerInvariant();
+
+    switch (subCommand)
+    {
+        case "add":
+            HandleSecurityRoleAddCommand(positionalArgs);
+            break;
+        case "update":
+            HandleSecurityRoleUpdateCommand(positionalArgs);
+            break;
+        default:
+            PrintSecurityRoleUsage();
+            Environment.Exit(1);
+            break;
+    }
+}
+
+static void PrintSecurityRoleUsage()
+{
+    AnsiConsole.MarkupLine("[bold]MetadataSync security-role[/] — manage security role privileges");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]add[/] <role-name> <entity> <access> [depth]");
+    AnsiConsole.MarkupLine("    Add a privilege to a security role. Merges with existing pending file if present.");
+    AnsiConsole.MarkupLine("    [grey]Access: Create, Read, Write, Delete, Append, AppendTo, Assign, Share[/]");
+    AnsiConsole.MarkupLine("    [grey]Depth:  Basic, Local, Deep, Global (default: Global)[/]");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role add \"Partner Service\" lead Create Global[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]update[/] <role-name>");
+    AnsiConsole.MarkupLine("    Checkout security role for editing. Creates a pending file to edit manually.");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role update \"Partner Service\"[/]");
+}
+
+static void HandleSecurityRoleAddCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 5)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] security-role add <role-name> <entity> <access> [depth]");
+        AnsiConsole.MarkupLine("[grey]Example: security-role add \"Partner Service\" lead Create Global[/]");
+        Environment.Exit(1);
+    }
+
+    var roleName = positionalArgs[2];
+    var entity = positionalArgs[3].ToLowerInvariant();
+    var access = positionalArgs[4];
+    var depth = positionalArgs.Length > 5 ? positionalArgs[5] : "Global";
+
+    // Validate access type
+    var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share" };
+    if (!validAccess.Contains(access.ToLowerInvariant()))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid access type:[/] '{access}'. Valid: {string.Join(", ", validAccess.Select(a => char.ToUpper(a[0]) + a[1..]))}");
+        Environment.Exit(1);
+    }
+
+    // Validate depth
+    var validDepth = new[] { "basic", "local", "deep", "global" };
+    if (!validDepth.Contains(depth.ToLowerInvariant()))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid depth:[/] '{depth}'. Valid: Basic, Local, Deep, Global");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SecurityRoles");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = roleName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.securityrole.json");
+
+    // Load existing pending file if present (merge mode)
+    var privileges = new List<PrivilegeEntry>();
+    if (File.Exists(destPath))
+    {
+        try
+        {
+            var existing = JsonSerializer.Deserialize<SecurityRoleUpdateDefinition>(
+                File.ReadAllText(destPath),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            if (existing != null)
+                privileges = existing.Privileges.ToList();
+        }
+        catch { /* ignore parse errors, start fresh */ }
+    }
+
+    // Check for duplicate
+    var newEntry = new PrivilegeEntry { Entity = entity, Access = access, Depth = depth };
+    var duplicate = privileges.FirstOrDefault(p =>
+        p.Entity.Equals(entity, StringComparison.OrdinalIgnoreCase) &&
+        p.Access.Equals(access, StringComparison.OrdinalIgnoreCase));
+
+    if (duplicate != null)
+    {
+        // Update depth if different
+        if (!duplicate.Depth.Equals(depth, StringComparison.OrdinalIgnoreCase))
+        {
+            privileges.Remove(duplicate);
+            privileges.Add(newEntry);
+            AnsiConsole.MarkupLine($"[yellow]Updated existing privilege depth:[/] {access} on {entity} → {depth}");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[yellow]Privilege already exists:[/] {access} on {entity} ({depth})");
+            return;
+        }
+    }
+    else
+    {
+        privileges.Add(newEntry);
+    }
+
+    var definition = new SecurityRoleUpdateDefinition
+    {
+        RoleName = roleName,
+        Privileges = privileges
+    };
+
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Privilege added to pending file:[/]");
+    AnsiConsole.MarkupLine($"  Role:      {roleName}");
+    AnsiConsole.MarkupLine($"  Entity:    {entity}");
+    AnsiConsole.MarkupLine($"  Access:    {access}");
+    AnsiConsole.MarkupLine($"  Depth:     {depth}");
+    AnsiConsole.MarkupLine($"  File:      {destPath}");
+    AnsiConsole.MarkupLine($"  Total:     {privileges.Count} privilege(s) pending");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]Run [blue]commit[/] to apply, or add more privileges first.[/]");
+}
+
+static void HandleSecurityRoleUpdateCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync security-role update <role-name>");
+        AnsiConsole.MarkupLine("[grey]Example: security-role update \"Partner Service\"[/]");
+        AnsiConsole.MarkupLine("[grey]Creates a pending file with the role's current privileges. Edit to add/modify, then commit.[/]");
+        Environment.Exit(1);
+    }
+
+    var roleName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+
+    // Try to load current privileges from exported SecurityRoles XML
+    var currentPrivileges = LoadPrivilegesFromExport(baseDir, roleName);
+
+    var definition = new SecurityRoleUpdateDefinition
+    {
+        RoleName = roleName,
+        Privileges = currentPrivileges
+    };
+
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SecurityRoles");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = roleName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.securityrole.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Security role pending file created:[/]");
+    AnsiConsole.MarkupLine($"  Role:       {roleName}");
+    AnsiConsole.MarkupLine($"  Privileges: {currentPrivileges.Count}");
+    AnsiConsole.MarkupLine($"  File:       {destPath}");
+    AnsiConsole.WriteLine();
+    if (currentPrivileges.Count > 0)
+        AnsiConsole.MarkupLine("[yellow]The file contains the role's current privileges. Add or modify entries, then run [blue]commit[/].[/]");
+    else
+        AnsiConsole.MarkupLine("[yellow]No existing privileges found in export. Add privilege entries, then run [blue]commit[/].[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]IMPORTANT: Apply least privilege — only grant what the service actually needs.[/]");
+}
+
+/// <summary>
+/// Load existing privileges from the SecurityRoles XML export.
+/// Maps CRM privilege names (prvReadkf_partnerrelation) back to entity + access.
+/// </summary>
+static List<PrivilegeEntry> LoadPrivilegesFromExport(string baseDir, string roleName)
+{
+    var entries = new List<PrivilegeEntry>();
+    var rolesDir = Path.Combine(baseDir, "SecurityRoles");
+    var xmlPath = Path.Combine(rolesDir, $"{roleName}.xml");
+
+    if (!File.Exists(xmlPath))
+        return entries;
+
+    try
+    {
+        var doc = System.Xml.Linq.XDocument.Load(xmlPath);
+        var ns = doc.Root?.Name.Namespace ?? System.Xml.Linq.XNamespace.None;
+        var privilegesEl = doc.Root?.Element(ns + "Privileges");
+        if (privilegesEl == null)
+            return entries;
+
+        // Parse privilege entries from XML (KeyValuePair structure from XrmMockup serialization)
+        foreach (var kvp in privilegesEl.Elements())
+        {
+            // The XrmMockup format nests privileges as entity name → access → depth
+            // For now, return empty if the XML privileges section is empty
+        }
+    }
+    catch
+    {
+        // Ignore parse errors, return empty
+    }
+
+    return entries;
+}
+
+// ──────────────────────────────────────────────────────────────
+// optionset add-value <name> <label> [--value <int>]
+// ──────────────────────────────────────────────────────────────
+static void HandleOptionSetCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 2)
+    {
+        PrintOptionSetUsage();
+        Environment.Exit(1);
+    }
+
+    var subCommand = positionalArgs[1].ToLowerInvariant();
+
+    switch (subCommand)
+    {
+        case "add-value":
+            HandleOptionSetAddValueCommand(positionalArgs, allArgs);
+            break;
+        default:
+            PrintOptionSetUsage();
+            Environment.Exit(1);
+            break;
+    }
+}
+
+static void PrintOptionSetUsage()
+{
+    AnsiConsole.MarkupLine("[bold]MetadataSync optionset[/] — manage global option set values");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]add-value[/] <optionset-name> <label> [--value <int>]");
+    AnsiConsole.MarkupLine("    Add a new value to a global option set. Merges with existing pending file if present.");
+    AnsiConsole.MarkupLine("    [grey]If --value is omitted, CRM auto-assigns the next available integer.[/]");
+    AnsiConsole.MarkupLine("    [grey]Example: optionset add-value kf_fieldinputtype \"Rådgiver\" --value 100000009[/]");
+}
+
+static void HandleOptionSetAddValueCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 4)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] optionset add-value <optionset-name> <label> [--value <int>]");
+        AnsiConsole.MarkupLine("[grey]Example: optionset add-value kf_fieldinputtype \"Rådgiver\" --value 100000009[/]");
+        Environment.Exit(1);
+    }
+
+    var optionSetName = positionalArgs[2].ToLowerInvariant();
+    var label = positionalArgs[3];
+
+    // Parse --value flag from allArgs (positionalArgs strips flags)
+    int? value = null;
+    var valueArg = ParseNamedArg(allArgs, "--value");
+    if (valueArg != null && int.TryParse(valueArg, out var parsed))
+        value = parsed;
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "GlobalOptionSets");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{optionSetName}.optionset.json");
+
+    // Load existing pending file if present (merge mode)
+    var values = new List<OptionSetValueEntry>();
+    if (File.Exists(destPath))
+    {
+        try
+        {
+            var existing = JsonSerializer.Deserialize<OptionSetValueDefinition>(
+                File.ReadAllText(destPath),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
+            if (existing != null)
+                values = existing.Values.ToList();
+        }
+        catch { /* ignore parse errors, start fresh */ }
+    }
+
+    // Check for duplicate
+    var newEntry = new OptionSetValueEntry { Label = label, Value = value };
+    var duplicate = values.FirstOrDefault(v =>
+        v.Label.Equals(label, StringComparison.OrdinalIgnoreCase)
+        || (value.HasValue && v.Value == value));
+
+    if (duplicate != null)
+    {
+        AnsiConsole.MarkupLine($"[yellow]Value already exists:[/] '{duplicate.Label}' = {duplicate.Value}");
+        return;
+    }
+
+    values.Add(newEntry);
+
+    var definition = new OptionSetValueDefinition
+    {
+        OptionSetName = optionSetName,
+        Values = values
+    };
+
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Option set value added to pending file:[/]");
+    AnsiConsole.MarkupLine($"  Option Set: {optionSetName}");
+    AnsiConsole.MarkupLine($"  Label:      {label}");
+    AnsiConsole.MarkupLine($"  Value:      {(value.HasValue ? value.Value.ToString() : "(auto-assign)")}");
+    AnsiConsole.MarkupLine($"  File:       {destPath}");
+    AnsiConsole.MarkupLine($"  Total:      {values.Count} value(s) pending");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]Run [blue]commit[/] to apply, or add more values first.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// import <table> [file]  — scaffold or stage a data import file
+// ──────────────────────────────────────────────────────────────
+static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync pcf[/] — stage PCF control for deployment");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  pcf push <project-path> [--prefix <publisher-prefix>]");
+        AnsiConsole.MarkupLine("    Stage a PCF control project for deployment via commit.");
+        AnsiConsole.MarkupLine("    The project must have been initialized with 'pac pcf push' at least once.");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Example:[/]");
+        AnsiConsole.MarkupLine("  pcf push src/pcf/EnreachQueueControl --prefix kf");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    if (!positionalArgs[1].Equals("push", StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine($"[red]Unknown pcf subcommand:[/] {positionalArgs[1]}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending");
+    Directory.CreateDirectory(pendingDir);
+
+    var projectPath = positionalArgs[2];
+    if (!Path.IsPathRooted(projectPath))
+        projectPath = Path.GetFullPath(projectPath);
+
+    if (!Directory.Exists(projectPath))
+    {
+        AnsiConsole.MarkupLine($"[red]PCF project directory not found:[/] {projectPath}");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Find the manifest to get the control name
+    var manifestFiles = Directory.GetFiles(projectPath, "ControlManifest.Input.xml", SearchOption.AllDirectories);
+    if (manifestFiles.Length == 0)
+    {
+        AnsiConsole.MarkupLine($"[red]No ControlManifest.Input.xml found in:[/] {projectPath}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var manifest = XDocument.Load(manifestFiles[0]);
+    var controlEl = manifest.Root!.Element("control")!;
+    var ns = controlEl.Attribute("namespace")!.Value;
+    var constructor = controlEl.Attribute("constructor")!.Value;
+    var controlName = $"{ns}.{constructor}";
+
+    var prefix = "kf";
+    for (int i = 0; i < allArgs.Length - 1; i++)
+    {
+        if (allArgs[i].Equals("--prefix", StringComparison.OrdinalIgnoreCase))
+        {
+            prefix = allArgs[i + 1];
+            break;
+        }
+    }
+
+    // Verify cdsproj exists
+    var cdsProj = Path.Combine(projectPath, $"obj/PowerAppsToolsTemp_{prefix}/PowerAppsToolsTemp_{prefix}.cdsproj");
+    if (!File.Exists(cdsProj))
+    {
+        AnsiConsole.MarkupLine($"[yellow]Warning:[/] cdsproj not found at: {cdsProj}");
+        AnsiConsole.MarkupLine($"[yellow]Run 'pac pcf push --publisher-prefix {prefix}' once to scaffold it.[/]");
+    }
+
+    var def = new PcfControlDefinition
+    {
+        Name = controlName,
+        ProjectPath = projectPath,
+        PublisherPrefix = prefix,
+    };
+
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    });
+
+    var fileName = $"{constructor}.pcf.json";
+    var filePath = Path.Combine(pendingDir, fileName);
+    File.WriteAllText(filePath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged:[/] {controlName}");
+    AnsiConsole.MarkupLine($"[grey]  File: {Path.GetRelativePath(baseDir, filePath)}[/]");
+    AnsiConsole.MarkupLine($"[grey]  Project: {projectPath}[/]");
+    AnsiConsole.MarkupLine($"[grey]  Prefix: {prefix}[/]");
+}
+
+static void HandleImportCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 2)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  import <table>         Scaffold an empty import template");
+        AnsiConsole.MarkupLine("  import <table> <file>  Stage an existing import file");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Example: import kf_partnerformline[/]");
+        AnsiConsole.MarkupLine("[grey]Example: import kf_partnerformline data/templates.import.json[/]");
+        Environment.Exit(1);
+    }
+
+    var tableName = positionalArgs[1].ToLowerInvariant();
+    var sourceFile = positionalArgs.Length >= 3 ? positionalArgs[2] : null;
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "Import");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{tableName}.import.json");
+
+    if (sourceFile != null)
+    {
+        // File mode: stage an existing file
+        if (!File.Exists(sourceFile))
+        {
+            AnsiConsole.MarkupLine($"[red]File not found:[/] {sourceFile}");
+            Environment.Exit(1);
+        }
+
+        // Validate JSON structure
+        try
+        {
+            var json = File.ReadAllText(sourceFile);
+            var parsed = JsonSerializer.Deserialize<DataImportDefinition>(json,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
+            if (parsed?.Table == null || parsed.Rows == null || parsed.MatchOn == null)
+                throw new InvalidOperationException("Missing required fields: table, matchOn, rows");
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[red]Invalid import file:[/] {ex.Message}");
+            Environment.Exit(1);
+        }
+
+        File.Copy(sourceFile, destPath, overwrite: true);
+        AnsiConsole.MarkupLine($"[green]Import file staged:[/] {destPath}");
+    }
+    else
+    {
+        // Scaffold mode: create template from entity metadata
+        var fields = DiscoverEntityFields(baseDir, solutionExportDir, tableName);
+
+        var template = new
+        {
+            table = tableName,
+            matchOn = new[] { fields.FirstOrDefault() ?? "kf_name" },
+            fieldTypes = BuildFieldTypeHints(fields, baseDir, solutionExportDir, tableName),
+            rows = new[] { fields.ToDictionary(f => f, f => (object?)null) }
+        };
+
+        File.WriteAllText(destPath, JsonSerializer.Serialize(template, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never
+        }));
+
+        AnsiConsole.MarkupLine($"[green]Import template created:[/]");
+        AnsiConsole.MarkupLine($"  Table:  {tableName}");
+        AnsiConsole.MarkupLine($"  Fields: {fields.Count}");
+        AnsiConsole.MarkupLine($"  File:   {destPath}");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Edit the file to set matchOn fields and add row data, then run [blue]commit[/].[/]");
+    }
+}
+
+/// <summary>
+/// Discover entity fields from Model/entities markdown or Entity.xml.
+/// Returns custom field logical names (kf_* prefix fields).
+/// </summary>
+static List<string> DiscoverEntityFields(string baseDir, string solutionExportDir, string tableName)
+{
+    // Try Model/entities/<table>.md first (has clean field list)
+    var mdPath = Path.Combine(baseDir, "Model", "entities", $"{tableName}.md");
+    if (File.Exists(mdPath))
+    {
+        var lines = File.ReadAllLines(mdPath);
+        var fields = new List<string>();
+        var inTable = false;
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("| ") && line.Contains(" | ") && !line.Contains("---"))
+            {
+                if (line.Contains("Logical Name"))
+                {
+                    inTable = true;
+                    continue;
+                }
+                if (inTable)
+                {
+                    var cols = line.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                    if (cols.Length > 0)
+                    {
+                        var fieldName = cols[0].Trim();
+                        // Include custom fields, skip virtual nav-property fields (end in "name" for lookups, yominame)
+                        if (fieldName.StartsWith("kf_") && !fieldName.EndsWith("yominame")
+                            && !(fieldName.EndsWith("name") && cols.Length >= 3 && cols[2].Trim().Contains("Virtual")))
+                            fields.Add(fieldName);
+                    }
+                }
+            }
+            else if (inTable && !line.StartsWith("|"))
+            {
+                break;
+            }
+        }
+        if (fields.Count > 0)
+            return fields;
+    }
+
+    // Fallback: return a generic template
+    return ["kf_name"];
+}
+
+/// <summary>
+/// Build fieldTypes hints for known integer fields (not OptionSets).
+/// </summary>
+static Dictionary<string, string> BuildFieldTypeHints(List<string> fields, string baseDir, string solutionExportDir, string tableName)
+{
+    var hints = new Dictionary<string, string>();
+    var mdPath = Path.Combine(baseDir, "Model", "entities", $"{tableName}.md");
+    if (!File.Exists(mdPath))
+        return hints;
+
+    var lines = File.ReadAllLines(mdPath);
+    var inTable = false;
+    foreach (var line in lines)
+    {
+        if (line.StartsWith("| ") && line.Contains(" | ") && !line.Contains("---"))
+        {
+            if (line.Contains("Logical Name"))
+            {
+                inTable = true;
+                continue;
+            }
+            if (inTable)
+            {
+                var cols = line.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                if (cols.Length >= 3)
+                {
+                    var fieldName = cols[0].Trim();
+                    var fieldType = cols[2].Trim();
+                    if (fields.Contains(fieldName))
+                    {
+                        if (fieldType.StartsWith("Integer"))
+                            hints[fieldName] = "int";
+                        else if (fieldType.StartsWith("Memo"))
+                            hints[fieldName] = "string";
+                        else if (fieldType.Contains("Lookup"))
+                            hints[fieldName] = "lookup";
+                        else if (fieldType.StartsWith("MultiSelect"))
+                            hints[fieldName] = "multiselect";
+                    }
+                }
+            }
+        }
+        else if (inTable && !line.StartsWith("|"))
+        {
+            break;
+        }
+    }
+    return hints;
+}
+
+// ──────────────────────────────────────────────────────────────
+// relationship update <schema-name> --delete <behavior> [--assign <behavior>] ...
+// ──────────────────────────────────────────────────────────────
+static void HandleRelationshipCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || !positionalArgs[1].Equals("update", StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync relationship update <schema-name> --delete <behavior>");
+        AnsiConsole.MarkupLine("[grey]Behaviors: Cascade, RemoveLink, Restrict, NoCascade[/]");
+        AnsiConsole.MarkupLine("[grey]Options: --delete, --assign, --share, --unshare, --reparent, --merge[/]");
+        AnsiConsole.MarkupLine("[grey]Example: relationship update kf_partnerformline_PartnerForm_kf_partnerforms --delete Cascade[/]");
+        Environment.Exit(1);
+    }
+
+    var schemaName = positionalArgs[2];
+    var deleteBehavior = ParseNamedArg(allArgs, "--delete");
+    var assignBehavior = ParseNamedArg(allArgs, "--assign");
+    var shareBehavior = ParseNamedArg(allArgs, "--share");
+    var unshareBehavior = ParseNamedArg(allArgs, "--unshare");
+    var reparentBehavior = ParseNamedArg(allArgs, "--reparent");
+    var mergeBehavior = ParseNamedArg(allArgs, "--merge");
+
+    if (deleteBehavior == null && assignBehavior == null && shareBehavior == null
+        && unshareBehavior == null && reparentBehavior == null && mergeBehavior == null)
+    {
+        AnsiConsole.MarkupLine("[red]At least one cascade behavior must be specified (e.g. --delete Cascade).[/]");
+        Environment.Exit(1);
+    }
+
+    var definition = new RelationshipUpdateDefinition
+    {
+        SchemaName = schemaName,
+        DeleteBehavior = deleteBehavior,
+        AssignBehavior = assignBehavior,
+        ShareBehavior = shareBehavior,
+        UnshareBehavior = unshareBehavior,
+        ReparentBehavior = reparentBehavior,
+        MergeBehavior = mergeBehavior
+    };
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{schemaName}.relationship.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Relationship update staged:[/]");
+    AnsiConsole.MarkupLine($"  Relationship: {schemaName}");
+    if (deleteBehavior != null) AnsiConsole.MarkupLine($"  Delete:       {deleteBehavior}");
+    if (assignBehavior != null) AnsiConsole.MarkupLine($"  Assign:       {assignBehavior}");
+    if (shareBehavior != null) AnsiConsole.MarkupLine($"  Share:        {shareBehavior}");
+    if (unshareBehavior != null) AnsiConsole.MarkupLine($"  Unshare:      {unshareBehavior}");
+    if (reparentBehavior != null) AnsiConsole.MarkupLine($"  Reparent:     {reparentBehavior}");
+    if (mergeBehavior != null) AnsiConsole.MarkupLine($"  Merge:        {mergeBehavior}");
+    AnsiConsole.MarkupLine($"  File:         {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// plugin register <dll-path> — scaffold plugin registration pending file
+// ──────────────────────────────────────────────────────────────
+static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("remove", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePluginRemoveCommand(positionalArgs, allArgs);
+        return;
+    }
+
+    if (positionalArgs.Length < 2 || (
+        !positionalArgs[1].Equals("register", StringComparison.OrdinalIgnoreCase) &&
+        !positionalArgs[1].Equals("update", StringComparison.OrdinalIgnoreCase)))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  plugin register <dll-path>     Create a new plugin registration pending file");
+        AnsiConsole.MarkupLine("  plugin update <dll-path>       Re-sync a previously registered plugin (keeps types/steps)");
+        AnsiConsole.MarkupLine("  plugin remove <assembly-name>  Remove a plugin assembly and its steps from CRM");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Example: plugin register src/MyPlugin/bin/Release/net462/MyPlugin.dll[/]");
+        Environment.Exit(1);
+    }
+
+    var subCommand = positionalArgs[1].ToLowerInvariant();
+
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine($"[red]Usage:[/] plugin {subCommand} <dll-path>");
+        Environment.Exit(1);
+    }
+
+    var dllPath = positionalArgs[2];
+    if (!File.Exists(dllPath))
+    {
+        var fullPath = Path.GetFullPath(dllPath);
+        if (!File.Exists(fullPath))
+        {
+            AnsiConsole.MarkupLine($"[red]DLL not found:[/] {dllPath}");
+            Environment.Exit(1);
+        }
+        dllPath = fullPath;
+    }
+
+    var assemblyName = Path.GetFileNameWithoutExtension(dllPath);
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    // Make assembly path relative to baseDir
+    var relativeDllPath = Path.GetRelativePath(baseDir, Path.GetFullPath(dllPath));
+
+    PluginRegistrationDefinition definition;
+
+    if (subCommand == "update")
+    {
+        // Look for previous committed or pending definition to reuse types/steps
+        var committedPath = Path.Combine(solutionExportDir, "_committed", "PluginAssemblies", $"{assemblyName}.plugin.json");
+        var pendingPath = Path.Combine(solutionExportDir, "_pending", "PluginAssemblies", $"{assemblyName}.plugin.json");
+
+        string? previousPath = File.Exists(committedPath) ? committedPath
+            : File.Exists(pendingPath) ? pendingPath
+            : null;
+
+        if (previousPath != null)
+        {
+            var previous = PluginRegistrationFileReader.Parse(previousPath);
+            definition = previous with { AssemblyPath = relativeDllPath };
+            AnsiConsole.MarkupLine($"[green]Reusing types/steps from previous registration ({previous.Types.Count} type(s)).[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[yellow]No previous registration found for '{assemblyName}'. Creating fresh skeleton.[/]");
+            definition = new PluginRegistrationDefinition
+            {
+                AssemblyName = assemblyName,
+                AssemblyPath = relativeDllPath,
+                IsolationMode = 2,
+                SourceType = 0,
+                SolutionUniqueName = solutionUniqueName,
+                Types = []
+            };
+        }
+    }
+    else
+    {
+        // Fresh registration — empty types for the agent to fill in
+        definition = new PluginRegistrationDefinition
+        {
+            AssemblyName = assemblyName,
+            AssemblyPath = relativeDllPath,
+            IsolationMode = 2,
+            SourceType = 0,
+            SolutionUniqueName = solutionUniqueName,
+            Types = []
+        };
+    }
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "PluginAssemblies");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{assemblyName}.plugin.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Plugin {subCommand} pending file created:[/]");
+    AnsiConsole.MarkupLine($"  Assembly: {assemblyName}");
+    AnsiConsole.MarkupLine($"  DLL:      {relativeDllPath}");
+    AnsiConsole.MarkupLine($"  Solution: {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:     {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the file to add plugin types and steps, then run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// plugin remove <assembly-name> — stage deletion of plugin assembly + steps
+// ──────────────────────────────────────────────────────────────
+static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync plugin remove <assembly-name>");
+        AnsiConsole.MarkupLine("[grey]Example: plugin remove PartnerRelationRootAccount[/]");
+        Environment.Exit(1);
+    }
+
+    var assemblyName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Find plugin assembly in solution export
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var pluginAssembliesDir = Path.Combine(solutionFolder, "PluginAssemblies");
+    var stepsDir = Path.Combine(solutionFolder, "SdkMessageProcessingSteps");
+
+    // Find the assembly folder
+    string? assemblyFolder = null;
+    Guid assemblyId = Guid.Empty;
+    if (Directory.Exists(pluginAssembliesDir))
+    {
+        foreach (var dir in Directory.GetDirectories(pluginAssembliesDir))
+        {
+            var folderName = Path.GetFileName(dir);
+            if (folderName.StartsWith(assemblyName, StringComparison.OrdinalIgnoreCase))
+            {
+                assemblyFolder = dir;
+                // Extract GUID from folder name: "AssemblyName-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+                var nameLen = assemblyName.Length;
+                if (folderName.Length > nameLen + 1 && folderName[nameLen] == '-')
+                {
+                    var guidStr = folderName[(nameLen + 1)..];
+                    if (Guid.TryParse(guidStr, out var parsed))
+                        assemblyId = parsed;
+                }
+                break;
+            }
+        }
+    }
+
+    // Find plugin type ID from the assembly data.xml
+    var pluginTypeNames = new List<string>();
+    var pluginTypeIds = new List<Guid>();
+    if (assemblyFolder != null)
+    {
+        var dataXml = Directory.GetFiles(assemblyFolder, "*.data.xml").FirstOrDefault();
+        if (dataXml != null)
+        {
+            var doc = System.Xml.Linq.XDocument.Load(dataXml);
+            foreach (var pt in doc.Descendants("PluginType"))
+            {
+                var name = pt.Attribute("Name")?.Value;
+                var idStr = pt.Attribute("PluginTypeId")?.Value;
+                if (name != null) pluginTypeNames.Add(name);
+                if (idStr != null && Guid.TryParse(idStr, out var ptId))
+                    pluginTypeIds.Add(ptId);
+            }
+        }
+    }
+
+    // Find steps that reference this assembly's plugin types
+    var stepFiles = new List<(Guid StepId, string Name, string FilePath)>();
+    if (Directory.Exists(stepsDir))
+    {
+        foreach (var stepFile in Directory.GetFiles(stepsDir, "*.xml"))
+        {
+            var stepDoc = System.Xml.Linq.XDocument.Load(stepFile);
+            var root = stepDoc.Root;
+            if (root == null) continue;
+
+            var pluginTypeName = root.Element("PluginTypeName")?.Value ?? "";
+            // Check if this step belongs to our assembly
+            if (pluginTypeNames.Any(pt => pluginTypeName.StartsWith(pt, StringComparison.OrdinalIgnoreCase))
+                || pluginTypeName.Contains(assemblyName, StringComparison.OrdinalIgnoreCase))
+            {
+                var stepIdStr = root.Attribute("SdkMessageProcessingStepId")?.Value?.Trim('{', '}');
+                var stepName = root.Attribute("Name")?.Value ?? "Unknown step";
+                if (stepIdStr != null && Guid.TryParse(stepIdStr, out var stepId))
+                    stepFiles.Add((stepId, stepName, stepFile));
+            }
+        }
+    }
+
+    // Create pending delete files
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "Deletes");
+    Directory.CreateDirectory(pendingDir);
+
+    var jsonOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    var createdFiles = new List<string>();
+
+    // Steps first (must be deleted before assembly)
+    foreach (var (stepId, stepName, _) in stepFiles)
+    {
+        var def = new DeleteDefinition
+        {
+            EntityType = "sdkmessageprocessingstep",
+            ComponentId = stepId,
+            DisplayName = stepName
+        };
+        var fileName = $"1_step_{stepId:N}.delete.json";
+        var path = Path.Combine(pendingDir, fileName);
+        File.WriteAllText(path, JsonSerializer.Serialize(def, jsonOptions));
+        createdFiles.Add(path);
+    }
+
+    // Then the assembly
+    if (assemblyId != Guid.Empty)
+    {
+        var def = new DeleteDefinition
+        {
+            EntityType = "pluginassembly",
+            ComponentId = assemblyId,
+            DisplayName = $"Assembly: {assemblyName}"
+        };
+        var path = Path.Combine(pendingDir, $"2_assembly_{assemblyName}.delete.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(def, jsonOptions));
+        createdFiles.Add(path);
+    }
+
+    AnsiConsole.MarkupLine($"[green]Plugin removal staged:[/]");
+    AnsiConsole.MarkupLine($"  Assembly: {assemblyName} ({assemblyId})");
+    AnsiConsole.MarkupLine($"  Steps:   {stepFiles.Count}");
+    foreach (var (_, name, _) in stepFiles)
+        AnsiConsole.MarkupLine($"    - {name}");
+    AnsiConsole.MarkupLine($"  Files:   {createdFiles.Count} delete file(s) created");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to remove from CRM.[/]");
+
+    if (assemblyId == Guid.Empty)
+        AnsiConsole.MarkupLine("[red]WARNING: Could not find assembly in solution export. You may need to set the ComponentId manually.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -3129,6 +4271,22 @@ static void HandlePendingCommand()
         items.Add(("Delete", $"{parsed.EntityType}: {parsed.DisplayName} ({parsed.ComponentId})", Path.GetRelativePath(pendingDir, f)));
     }
 
+    var pendingNewAttributeFiles = Directory.GetFiles(pendingDir, "*.attribute.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingNewAttributeFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<NewAttributeDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        var typeLabel = parsed.AttributeType == "lookup"
+            ? $"Lookup → {parsed.TargetEntityLogicalName}"
+            : parsed.AttributeType;
+        var actionLabel = string.Equals(parsed.Action, "update", StringComparison.OrdinalIgnoreCase)
+            ? "Update Attribute"
+            : "New Attribute";
+        items.Add((actionLabel, $"{parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({typeLabel}, \"{parsed.DisplayName}\")", Path.GetRelativePath(pendingDir, f)));
+    }
+
     foreach (var f in pendingWebResourceFiles)
     {
         var parsed = JsonSerializer.Deserialize<WebResourceUploadDefinition>(File.ReadAllText(f))!;
@@ -3139,6 +4297,61 @@ static void HandlePendingCommand()
     {
         var parsed = AppActionFileReader.Parse(f);
         items.Add(("CommandBar", $"{parsed.Label ?? parsed.Name ?? parsed.UniqueName} ({parsed.EntityLogicalName}, {parsed.UniqueName})", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingPluginFiles = Directory.GetFiles(pendingDir, "*.plugin.json", SearchOption.AllDirectories)
+        .Where(f => f.Contains("PluginAssemblies", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    foreach (var f in pendingPluginFiles)
+    {
+        var parsed = PluginRegistrationFileReader.Parse(f);
+        var stepCount = parsed.Types.SelectMany(t => t.Steps).Count();
+        items.Add(("Plugin", $"{parsed.AssemblyName} ({parsed.Types.Count} type(s), {stepCount} step(s))", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingRelationshipFiles = Directory.GetFiles(pendingDir, "*.relationship.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingRelationshipFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<RelationshipUpdateDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        var changes = new List<string>();
+        if (parsed.DeleteBehavior != null) changes.Add($"Delete={parsed.DeleteBehavior}");
+        if (parsed.AssignBehavior != null) changes.Add($"Assign={parsed.AssignBehavior}");
+        items.Add(("Relationship", $"{parsed.SchemaName} ({string.Join(", ", changes)})", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingImportFiles = Directory.GetFiles(pendingDir, "*.import.json", SearchOption.AllDirectories)
+        .Where(f => f.Contains("Import", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    foreach (var f in pendingImportFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<DataImportDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Import", $"{parsed.Table} ({parsed.Rows.Count} rows, match: {string.Join("+", parsed.MatchOn)})", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingPcfFiles = Directory.GetFiles(pendingDir, "*.pcf.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingPcfFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<PcfControlDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        items.Add(("PCF Control", parsed.Name, Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingSecurityRoleFiles = Directory.GetFiles(pendingDir, "*.securityrole.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSecurityRoleFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SecurityRoleUpdateDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Security Role", $"{parsed.RoleName} ({parsed.Privileges.Count} privileges)", Path.GetRelativePath(pendingDir, f)));
     }
 
     if (items.Count == 0)
@@ -3210,17 +4423,50 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[grey]Pending items:[/]");
         foreach (var item in commitItems)
+        {
             AnsiConsole.MarkupLine($"  [grey]• {Markup.Escape(item.DisplayName)}[/]");
+            if (item.Type == CommitItemType.SecurityRoleUpdate && item.ParsedData is SecurityRoleUpdateDefinition roleDef)
+            {
+                foreach (var priv in roleDef.Privileges)
+                    AnsiConsole.MarkupLine($"    [grey]  {priv.Access} on {priv.Entity} ({priv.Depth})[/]");
+            }
+        }
         Environment.Exit(1);
     }
 
-    var selected = AnsiConsole.Prompt(
-        new MultiSelectionPrompt<CommitItem>()
-            .Title("Select changes to push to CRM:")
-            .PageSize(15)
-            .InstructionsText("[grey](Press [blue]<space>[/] to toggle, [green]<enter>[/] to accept)[/]")
-            .AddChoices(commitItems)
-            .UseConverter(c => c.DisplayName));
+    var prompt = new MultiSelectionPrompt<CommitItem>()
+        .Title("Select changes to push to CRM:")
+        .PageSize(20)
+        .InstructionsText("[grey](Press [blue]<space>[/] to toggle, [green]<enter>[/] to accept)[/]")
+        .UseConverter(c => c.DisplayName);
+
+    // Add items — for security roles, show privilege details in the converter
+    foreach (var item in commitItems)
+        prompt.AddChoice(item);
+
+    // Show expanded details below the selection for security roles and option sets
+    foreach (var item in commitItems.Where(i => i.Type == CommitItemType.OptionSetValue))
+    {
+        if (item.ParsedData is OptionSetValueDefinition osDef && osDef.Values.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"  [blue]{Markup.Escape(item.DisplayName)}[/]");
+            foreach (var val in osDef.Values)
+                AnsiConsole.MarkupLine($"    [grey]• \"{val.Label}\" = {(val.Value.HasValue ? val.Value.Value.ToString() : "auto")}[/]");
+            AnsiConsole.WriteLine();
+        }
+    }
+    foreach (var item in commitItems.Where(i => i.Type == CommitItemType.SecurityRoleUpdate))
+    {
+        if (item.ParsedData is SecurityRoleUpdateDefinition roleDef && roleDef.Privileges.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"  [blue]{Markup.Escape(item.DisplayName)}[/]");
+            foreach (var priv in roleDef.Privileges)
+                AnsiConsole.MarkupLine($"    [grey]• {priv.Access} on {priv.Entity} ({priv.Depth})[/]");
+            AnsiConsole.WriteLine();
+        }
+    }
+
+    var selected = AnsiConsole.Prompt(prompt);
 
     if (selected.Count == 0)
     {
@@ -3228,13 +4474,16 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         return;
     }
 
-    // Confirm
+    // Confirm — show details for each selected item
     AnsiConsole.WriteLine();
     var table = new Table().Border(TableBorder.Rounded)
         .AddColumn("Type")
-        .AddColumn("Name");
+        .AddColumn("Details");
     foreach (var item in selected)
-        table.AddRow(item.Type.ToString(), Markup.Escape(item.DisplayName));
+    {
+        var details = FormatCommitItemDetails(item);
+        table.AddRow(item.Type.ToString(), details);
+    }
     AnsiConsole.Write(table);
     AnsiConsole.WriteLine();
 
@@ -3341,9 +4590,59 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
             || item.Type == CommitItemType.Delete
             || item.Type == CommitItemType.WebResourceUpload
             || item.Type == CommitItemType.CommandBar
+            || item.Type == CommitItemType.Deprecate
+            || item.Type == CommitItemType.NewAttribute
+            || item.Type == CommitItemType.RibbonWorkbench
+            || item.Type == CommitItemType.RelationshipUpdate
+            || item.Type == CommitItemType.SecurityRoleUpdate
+            || item.Type == CommitItemType.DataImport
             || isNewView || isNewForm || isNewBusinessRule)
         {
             AnsiConsole.MarkupLine($"[green]\u2713[/] {Markup.Escape(item.DisplayName)} \u2014 pushed & archived");
+            continue;
+        }
+
+        // Plugin: verify assembly + steps exist in re-exported solution
+        if (item.Type == CommitItemType.PluginRegistration)
+        {
+            var pluginDef = (PluginRegistrationDefinition)item.ParsedData;
+            var pluginAssemblyDirs = Directory.Exists(Path.Combine(verifySolutionFolder, "PluginAssemblies"))
+                ? Directory.GetDirectories(Path.Combine(verifySolutionFolder, "PluginAssemblies"))
+                : Array.Empty<string>();
+            var assemblyNameNoDots = pluginDef.AssemblyName.Replace(".", "");
+            var assemblyFound = pluginAssemblyDirs.Any(d =>
+            {
+                var folderName = Path.GetFileName(d);
+                return folderName.StartsWith(pluginDef.AssemblyName, StringComparison.OrdinalIgnoreCase)
+                    || folderName.StartsWith(assemblyNameNoDots, StringComparison.OrdinalIgnoreCase);
+            });
+
+            var stepsDir = Path.Combine(verifySolutionFolder, "SdkMessageProcessingSteps");
+            var expectedStepCount = pluginDef.Types.SelectMany(t => t.Steps).Count();
+            var actualStepCount = 0;
+            if (Directory.Exists(stepsDir))
+            {
+                foreach (var stepFile in Directory.GetFiles(stepsDir, "*.xml"))
+                {
+                    var stepXml = File.ReadAllText(stepFile);
+                    if (stepXml.Contains(pluginDef.AssemblyName, StringComparison.OrdinalIgnoreCase)
+                        || stepXml.Contains(assemblyNameNoDots, StringComparison.OrdinalIgnoreCase))
+                        actualStepCount++;
+                }
+            }
+
+            if (assemblyFound && actualStepCount >= expectedStepCount)
+            {
+                AnsiConsole.MarkupLine($"[green]\u2713[/] {Markup.Escape(item.DisplayName)} \u2014 verified (assembly + {actualStepCount} step(s) in re-export)");
+            }
+            else if (assemblyFound)
+            {
+                AnsiConsole.MarkupLine($"[yellow]\u26a0[/] {Markup.Escape(item.DisplayName)} \u2014 assembly found but only {actualStepCount}/{expectedStepCount} step(s) in re-export");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[red]\u2717[/] {Markup.Escape(item.DisplayName)} \u2014 assembly NOT found in re-exported solution");
+            }
             continue;
         }
 
@@ -3825,6 +5124,36 @@ static string GetSolutionFolder(string solutionExportDir)
             return !name.StartsWith('.') && !name.StartsWith('_');
         })
         ?? throw new InvalidOperationException("No solution folder found in SolutionExport/");
+}
+
+/// <summary>
+/// Format detailed description of a commit item for the confirmation table.
+/// Shows expanded info for items that benefit from detail (e.g., security role privileges).
+/// </summary>
+static string FormatCommitItemDetails(CommitItem item)
+{
+    if (item.Type == CommitItemType.SecurityRoleUpdate && item.ParsedData is SecurityRoleUpdateDefinition roleDef)
+    {
+        var lines = new List<string> { Markup.Escape(item.DisplayName) };
+        foreach (var priv in roleDef.Privileges)
+            lines.Add($"  [grey]• {Markup.Escape(priv.Access)} on {Markup.Escape(priv.Entity)} ({Markup.Escape(priv.Depth)})[/]");
+        return string.Join("\n", lines);
+    }
+
+    if (item.Type == CommitItemType.OptionSetValue && item.ParsedData is OptionSetValueDefinition osDef)
+    {
+        var lines = new List<string> { Markup.Escape(item.DisplayName) };
+        foreach (var val in osDef.Values)
+            lines.Add($"  [grey]• \"{Markup.Escape(val.Label)}\" = {(val.Value.HasValue ? val.Value.Value.ToString() : "auto")}[/]");
+        return string.Join("\n", lines);
+    }
+
+    if (item.Type == CommitItemType.NewAttribute && item.ParsedData is NewAttributeDefinition attrDef)
+    {
+        return $"{Markup.Escape(item.DisplayName)}\n  [grey]• Type: {Markup.Escape(attrDef.AttributeType)}, Entity: {Markup.Escape(attrDef.EntityLogicalName)}[/]";
+    }
+
+    return Markup.Escape(item.DisplayName);
 }
 
 static string GetBaseDir(string metadataPath)

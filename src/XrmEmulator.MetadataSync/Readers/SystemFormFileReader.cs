@@ -48,12 +48,17 @@ public static class SystemFormFileReader
         var formXml = formElement.Element("form")?.ToString();
         var objectTypeCode = formElement.Element("objecttypecode")?.Value;
 
-        // Detect form type from folder: quickCreate → 7, main → 2 (default)
+        // Detect form type from folder: quickCreate → 7, quick → 6 (Quick View), main → 2 (default)
         var formType = 2;
         if (sourceFilePath.Contains("/quickCreate/", StringComparison.OrdinalIgnoreCase)
             || sourceFilePath.Contains("\\quickCreate\\", StringComparison.OrdinalIgnoreCase))
         {
             formType = 7;
+        }
+        else if (sourceFilePath.Contains("/quick/", StringComparison.OrdinalIgnoreCase)
+            || sourceFilePath.Contains("\\quick\\", StringComparison.OrdinalIgnoreCase))
+        {
+            formType = 6;
         }
 
         return new SystemFormDefinition

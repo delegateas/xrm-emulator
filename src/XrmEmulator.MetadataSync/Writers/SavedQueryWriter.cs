@@ -16,7 +16,33 @@ public static class SavedQueryWriter
             entity["fetchxml"] = query.FetchXml;
 
         if (query.LayoutXml != null)
-            entity["layoutxml"] = query.LayoutXml;
+        {
+            // CRM requires the 'object' attribute on <grid> for updates but strips it on export.
+            // Auto-inject it by retrieving the entity type code from the existing view.
+            var layoutXml = query.LayoutXml;
+            if (layoutXml.Contains("<grid") && !layoutXml.Contains("object="))
+            {
+                var existing = service.Retrieve("savedquery", query.SavedQueryId,
+                    new Microsoft.Xrm.Sdk.Query.ColumnSet("returnedtypecode"));
+                var entityTypeCode = existing.GetAttributeValue<string>("returnedtypecode");
+                if (!string.IsNullOrEmpty(entityTypeCode))
+                {
+                    // Resolve entity type code from logical name
+                    var metaReq = new Microsoft.Xrm.Sdk.Messages.RetrieveEntityRequest
+                    {
+                        LogicalName = entityTypeCode,
+                        EntityFilters = Microsoft.Xrm.Sdk.Metadata.EntityFilters.Entity
+                    };
+                    var metaResp = (Microsoft.Xrm.Sdk.Messages.RetrieveEntityResponse)service.Execute(metaReq);
+                    var otc = metaResp.EntityMetadata.ObjectTypeCode;
+                    if (otc.HasValue)
+                    {
+                        layoutXml = layoutXml.Replace("<grid ", $"<grid object=\"{otc.Value}\" ");
+                    }
+                }
+            }
+            entity["layoutxml"] = layoutXml;
+        }
 
         service.Update(entity);
     }

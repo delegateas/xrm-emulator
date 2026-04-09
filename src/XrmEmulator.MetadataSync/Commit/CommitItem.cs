@@ -17,7 +17,14 @@ public enum CommitItemType
     NewAttribute,
     WebResourceUpload,
     CommandBar,
-    RibbonWorkbench
+    RibbonWorkbench,
+    PluginRegistration,
+    RelationshipUpdate,
+    DataImport,
+    SecurityRoleUpdate,
+    PcfControl,
+    OptionSetValue,
+    StatusValue
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

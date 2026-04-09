@@ -242,8 +242,13 @@ public static class CommitPipeline
             var typeLabel = parsed.AttributeType == "lookup"
                 ? $"Lookup → {parsed.TargetEntityLogicalName}"
                 : parsed.AttributeType;
-            commitItems.Add(new CommitItem(CommitItemType.NewAttribute,
-                $"New Attribute: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({typeLabel})", f, parsed));
+            var actionLabel = string.Equals(parsed.Action, "update", StringComparison.OrdinalIgnoreCase)
+                ? "Update Attribute" : "New Attribute";
+            var attrDetails = $"{actionLabel}: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName}"
+                + $" | Schema: {parsed.AttributeSchemaName}"
+                + $" | Display: \"{parsed.DisplayName}\""
+                + $" | Type: {typeLabel}";
+            commitItems.Add(new CommitItem(CommitItemType.NewAttribute, attrDetails, f, parsed));
         }
 
         foreach (var f in pendingWebResourceFiles)
@@ -258,6 +263,106 @@ public static class CommitPipeline
             var parsed = AppActionFileReader.Parse(f);
             commitItems.Add(new CommitItem(CommitItemType.CommandBar,
                 $"CommandBar: {parsed.Label ?? parsed.Name ?? parsed.UniqueName} ({parsed.EntityLogicalName}, {parsed.UniqueName})", f, parsed));
+        }
+
+        // Plugin registrations
+        var pendingPluginFiles = Directory.GetFiles(pendingDir, "*.plugin.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("PluginAssemblies", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var f in pendingPluginFiles)
+        {
+            var parsed = PluginRegistrationFileReader.Parse(f);
+            var stepCount = parsed.Types.SelectMany(t => t.Steps).Count();
+            commitItems.Add(new CommitItem(CommitItemType.PluginRegistration,
+                $"Plugin: {parsed.AssemblyName} ({parsed.Types.Count} type(s), {stepCount} step(s))",
+                f, parsed));
+        }
+
+        // Data imports
+        var pendingImportFiles = Directory.GetFiles(pendingDir, "*.import.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("Import", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var f in pendingImportFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<DataImportDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.DataImport,
+                $"Import: {parsed.Table} ({parsed.Rows.Count} row(s), match on: {string.Join("+", parsed.MatchOn)})",
+                f, parsed));
+        }
+
+        // Security role updates
+        var pendingSecurityRoleFiles = Directory.GetFiles(pendingDir, "*.securityrole.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSecurityRoleFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SecurityRoleUpdateDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SecurityRoleUpdate,
+                $"Security Role: {parsed.RoleName} ({parsed.Privileges.Count} privilege(s))",
+                f, parsed));
+        }
+
+        // Option set value additions
+        var pendingOptionSetFiles = Directory.GetFiles(pendingDir, "*.optionset.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingOptionSetFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<OptionSetValueDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.OptionSetValue,
+                $"Option Set: {parsed.OptionSetName} ({parsed.Values.Count} value(s))",
+                f, parsed));
+        }
+
+        // Status value changes
+        var pendingStatusValueFiles = Directory.GetFiles(pendingDir, "*.statusvalue.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingStatusValueFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<StatusValueDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            var changeCount = (parsed.RenameStatusCodes?.Count ?? 0) + (parsed.AddStatusCodes?.Count ?? 0);
+            commitItems.Add(new CommitItem(CommitItemType.StatusValue,
+                $"Status Values: {parsed.EntityLogicalName} ({changeCount} change(s))",
+                f, parsed));
+        }
+
+        // Relationship updates
+        var pendingRelationshipFiles = Directory.GetFiles(pendingDir, "*.relationship.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingRelationshipFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<RelationshipUpdateDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+            var changes = new List<string>();
+            if (parsed.DeleteBehavior != null) changes.Add($"Delete={parsed.DeleteBehavior}");
+            if (parsed.AssignBehavior != null) changes.Add($"Assign={parsed.AssignBehavior}");
+            if (parsed.ShareBehavior != null) changes.Add($"Share={parsed.ShareBehavior}");
+            if (parsed.UnshareBehavior != null) changes.Add($"Unshare={parsed.UnshareBehavior}");
+            if (parsed.ReparentBehavior != null) changes.Add($"Reparent={parsed.ReparentBehavior}");
+            if (parsed.MergeBehavior != null) changes.Add($"Merge={parsed.MergeBehavior}");
+            commitItems.Add(new CommitItem(CommitItemType.RelationshipUpdate,
+                $"Relationship: {parsed.SchemaName} ({string.Join(", ", changes)})",
+                f, parsed));
+        }
+
+        // PCF Controls
+        var pendingPcfFiles = Directory.GetFiles(pendingDir, "*.pcf.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingPcfFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<PcfControlDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+            commitItems.Add(new CommitItem(CommitItemType.PcfControl,
+                $"PCF Control: {parsed.Name}", f, parsed));
         }
 
         // Ribbon Workbench actions (hide, etc.)
@@ -276,6 +381,41 @@ public static class CommitPipeline
             };
             commitItems.Add(new CommitItem(CommitItemType.RibbonWorkbench, label, f, parsed));
         }
+
+        // Sort by natural dependency order: web resources before forms (forms may reference web resources)
+        var typeOrder = new Dictionary<CommitItemType, int>
+        {
+            [CommitItemType.NewAttribute] = 0,
+            [CommitItemType.Entity] = 1,
+            [CommitItemType.OptionSetValue] = 2,
+            [CommitItemType.StatusValue] = 2,
+            [CommitItemType.SecurityRoleUpdate] = 3,
+            [CommitItemType.WebResourceUpload] = 3,
+            [CommitItemType.IconUpload] = 4,
+            [CommitItemType.IconSet] = 5,
+            [CommitItemType.SavedQuery] = 6,
+            [CommitItemType.SystemForm] = 7,
+            [CommitItemType.SiteMap] = 8,
+            [CommitItemType.BusinessRule] = 9,
+            [CommitItemType.AppModuleEntity] = 10,
+            [CommitItemType.AppModuleView] = 11,
+            [CommitItemType.AppModuleForm] = 12,
+            [CommitItemType.CommandBar] = 13,
+            [CommitItemType.PcfControl] = 14,
+            [CommitItemType.PluginRegistration] = 15,
+            [CommitItemType.DataImport] = 16,
+            [CommitItemType.RelationshipUpdate] = 17,
+            [CommitItemType.Delete] = 18,
+            [CommitItemType.Deprecate] = 19,
+            [CommitItemType.RibbonWorkbench] = 20,
+        };
+        commitItems.Sort((a, b) =>
+        {
+            var typeCompare = typeOrder.GetValueOrDefault(a.Type, 99).CompareTo(typeOrder.GetValueOrDefault(b.Type, 99));
+            if (typeCompare != 0) return typeCompare;
+            // Within same type, sort by filename for deterministic ordering
+            return string.Compare(Path.GetFileName(a.FilePath), Path.GetFileName(b.FilePath), StringComparison.OrdinalIgnoreCase);
+        });
 
         return commitItems;
     }
@@ -324,8 +464,26 @@ public static class CommitPipeline
         var committedItems = new List<CommitItem>();
         var archivedGitPaths = new List<string>(); // Track files for targeted git commit
 
+        // Publish schema changes before data operations to ensure new fields are available.
+        // This handles both same-commit (NewAttribute + DataImport) and resume scenarios
+        // (NewAttribute committed previously but publish failed due to DataImport error).
+        var hasSchemaChanges = orderedItems.Any(i => i.Type is CommitItemType.NewAttribute or CommitItemType.Entity);
+        var hasDataImports = orderedItems.Any(i => i.Type == CommitItemType.DataImport);
+        var needsMidCommitPublish = hasSchemaChanges || hasDataImports;
+        var midCommitPublishDone = false;
+
         foreach (var item in orderedItems)
         {
+            // Publish schema changes before processing data imports
+            if (needsMidCommitPublish && !midCommitPublishDone
+                && item.Type != CommitItemType.NewAttribute && item.Type != CommitItemType.Entity)
+            {
+                log?.Invoke("Publishing schema changes before data operations...");
+                SavedQueryWriter.PublishAll(client);
+                log?.Invoke("  Published OK.");
+                midCommitPublishDone = true;
+            }
+
             var hasVars = PendingVariableResolver.HasVariables(item.FilePath);
             string? resolvedContent = hasVars
                 ? PendingVariableResolver.ResolveFileContent(item.FilePath, resolvedOutputs)
@@ -763,6 +921,16 @@ public static class CommitPipeline
                                     RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
                                     Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
                                 },
+                                "picklist" => new PicklistAttributeMetadata
+                                {
+                                    SchemaName = def.AttributeSchemaName,
+                                    DisplayName = new Label(def.DisplayName, 1030),
+                                    RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                                    Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030),
+                                    OptionSet = string.IsNullOrEmpty(def.OptionSetName)
+                                        ? new OptionSetMetadata { IsGlobal = false, OptionSetType = OptionSetType.Picklist }
+                                        : new OptionSetMetadata { Name = def.OptionSetName, IsGlobal = true }
+                                },
                                 "datetime" => new DateTimeAttributeMetadata
                                 {
                                     SchemaName = def.AttributeSchemaName,
@@ -771,18 +939,44 @@ public static class CommitPipeline
                                     RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
                                     Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
                                 },
+                                "image" => new ImageAttributeMetadata
+                                {
+                                    SchemaName = def.AttributeSchemaName,
+                                    MaxSizeInKB = def.MaxLength is > 0 ? def.MaxLength.Value / 1024 : 1024,
+                                    CanStoreFullImage = true,
+                                    DisplayName = new Label(def.DisplayName, 1030),
+                                    RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                                    Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
+                                },
                                 _ => throw new InvalidOperationException($"Unsupported attribute type: {def.AttributeType}")
                             };
 
-                            var createReq = new CreateAttributeRequest
+                            if (string.Equals(def.Action, "update", StringComparison.OrdinalIgnoreCase))
                             {
-                                EntityName = def.EntityLogicalName,
-                                Attribute = attrMeta
-                            };
-                            createReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+                                log?.Invoke($"Updating attribute: {def.EntityLogicalName}.{def.AttributeLogicalName}");
+                                attrMeta.LogicalName = def.AttributeLogicalName;
+                                var updateReq = new UpdateAttributeRequest
+                                {
+                                    EntityName = def.EntityLogicalName,
+                                    Attribute = attrMeta,
+                                    MergeLabels = true
+                                };
+                                updateReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+                                client.Execute(updateReq);
+                                log?.Invoke($"  Attribute updated OK.");
+                            }
+                            else
+                            {
+                                var createReq = new CreateAttributeRequest
+                                {
+                                    EntityName = def.EntityLogicalName,
+                                    Attribute = attrMeta
+                                };
+                                createReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
 
-                            var resp = (CreateAttributeResponse)client.Execute(createReq);
-                            log?.Invoke($"  Attribute created OK. ID: {resp.AttributeId}");
+                                var resp = (CreateAttributeResponse)client.Execute(createReq);
+                                log?.Invoke($"  Attribute created OK. ID: {resp.AttributeId}");
+                            }
                         }
                         break;
                     }
@@ -856,6 +1050,130 @@ public static class CommitPipeline
                                 }
                             }
                         }
+                        break;
+                    }
+
+                    case CommitItemType.PluginRegistration:
+                    {
+                        var def = (PluginRegistrationDefinition)item.ParsedData;
+                        log?.Invoke($"Registering plugin assembly: {def.AssemblyName}");
+
+                        // Validate DLL types match the JSON definition
+                        var dllWarnings = PluginWriter.ValidateTypesAgainstDll(def, baseDir);
+                        foreach (var warning in dllWarnings)
+                        {
+                            log?.Invoke($"  WARNING: {warning}");
+                        }
+                        if (dllWarnings.Any(w => w.Contains("not found in DLL")))
+                        {
+                            throw new InvalidOperationException(
+                                "Plugin JSON references types not found in DLL. Fix plugin.json or rebuild the assembly.");
+                        }
+
+                        // Remove steps/types that are no longer in the definition before uploading the new DLL
+                        var existingAssemblyId = PluginWriter.FindExistingAssemblyId(client, def.AssemblyName);
+                        if (existingAssemblyId.HasValue)
+                        {
+                            PluginWriter.RemoveOrphanedStepsAndTypes(client, def, existingAssemblyId.Value, log);
+                        }
+
+                        var assemblyId = PluginWriter.RegisterAssembly(client, def, baseDir, def.SolutionUniqueName);
+                        log?.Invoke($"  Assembly registered. ID: {assemblyId}");
+
+                        foreach (var typeDef in def.Types)
+                        {
+                            var typeId = PluginWriter.RegisterType(client, typeDef, assemblyId);
+                            log?.Invoke($"  Type registered: {typeDef.TypeName} (ID: {typeId})");
+
+                            foreach (var stepDef in typeDef.Steps)
+                            {
+                                var stepId = PluginWriter.RegisterStep(client, stepDef, typeId, def.SolutionUniqueName);
+                                log?.Invoke($"    Step registered: {stepDef.MessageName} on {stepDef.PrimaryEntity} (ID: {stepId})");
+
+                                if (stepDef.Images != null)
+                                {
+                                    foreach (var imageDef in stepDef.Images)
+                                    {
+                                        var imageId = PluginWriter.RegisterImage(client, imageDef, stepId);
+                                        log?.Invoke($"      Image registered: {imageDef.Name} (ID: {imageId})");
+                                    }
+                                }
+                            }
+                        }
+
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = assemblyId.ToString() };
+                        break;
+                    }
+
+                    case CommitItemType.PcfControl:
+                    {
+                        var def = (PcfControlDefinition)item.ParsedData;
+                        log?.Invoke($"Deploying PCF control: {def.Name}");
+                        var controlId = PcfControlWriter.Upsert(client, def, baseDir, log);
+                        log?.Invoke($"  PCF control deployed OK. ID: {controlId}");
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = controlId.ToString() };
+                        break;
+                    }
+
+                    case CommitItemType.RelationshipUpdate:
+                    {
+                        var def = (RelationshipUpdateDefinition)item.ParsedData;
+                        log?.Invoke($"Updating relationship: {def.SchemaName}");
+                        RelationshipWriter.Update(client, def);
+                        log?.Invoke($"  Relationship updated OK.");
+                        break;
+                    }
+
+                    case CommitItemType.SecurityRoleUpdate:
+                    {
+                        var def = (SecurityRoleUpdateDefinition)item.ParsedData;
+                        log?.Invoke($"Updating security role: {def.RoleName}");
+                        SecurityRoleWriter.UpdatePrivileges(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.OptionSetValue:
+                    {
+                        var def = (OptionSetValueDefinition)item.ParsedData;
+                        log?.Invoke($"Adding values to option set: {def.OptionSetName}");
+                        OptionSetWriter.AddValues(client, def, metadata.Solution?.UniqueName, log);
+                        break;
+                    }
+
+                    case CommitItemType.StatusValue:
+                    {
+                        var def = (StatusValueDefinition)item.ParsedData;
+                        log?.Invoke($"Updating status values: {def.EntityLogicalName}");
+                        StatusValueWriter.Apply(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.DataImport:
+                    {
+                        var def = (DataImportDefinition)item.ParsedData;
+                        log?.Invoke($"Importing {def.Rows.Count} row(s) into {def.Table} (match on: {string.Join("+", def.MatchOn)})");
+                        var created = 0;
+                        var updated = 0;
+                        var rowIndex = 0;
+                        foreach (var row in def.Rows)
+                        {
+                            rowIndex++;
+                            var rowLabel = string.Join(", ", def.MatchOn
+                                .Where(m => row.ContainsKey(m) && row[m]?.ValueKind != JsonValueKind.Null)
+                                .Select(m => $"{m}={row[m]}"));
+                            try
+                            {
+                                var (id, wasCreated) = DataImportWriter.UpsertRow(client, def.Table, def.MatchOn, def.FieldTypes, row);
+                                if (wasCreated) created++; else updated++;
+                                log?.Invoke($"  {(wasCreated ? "Created" : "Updated")} {def.Table} {id} [{rowLabel}]");
+                            }
+                            catch (Exception rowEx)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Row {rowIndex} [{rowLabel}]: {rowEx.Message}", rowEx);
+                            }
+                        }
+                        log?.Invoke($"  Import complete: {created} created, {updated} updated.");
                         break;
                     }
                 }
