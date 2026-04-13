@@ -233,6 +233,23 @@ public static class CommitPipeline
                 $"Deprecate: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName} → \"{parsed.NewDisplayName}\"", f, parsed));
         }
 
+        // New entity definitions
+        var pendingNewEntityFiles = Directory.GetFiles(pendingDir, "*.entity.json", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("_committed"))
+            .ToList();
+
+        foreach (var f in pendingNewEntityFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<NewEntityDefinition>(File.ReadAllText(f), new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            })!;
+            var attrCount = parsed.Attributes?.Count ?? 0;
+            commitItems.Add(new CommitItem(CommitItemType.NewEntity,
+                $"New Entity: {parsed.EntityLogicalName} \"{parsed.DisplayName}\" ({attrCount} additional field(s))",
+                f, parsed));
+        }
+
         foreach (var f in pendingNewAttributeFiles)
         {
             var parsed = JsonSerializer.Deserialize<NewAttributeDefinition>(File.ReadAllText(f), new JsonSerializerOptions
@@ -242,8 +259,12 @@ public static class CommitPipeline
             var typeLabel = parsed.AttributeType == "lookup"
                 ? $"Lookup → {parsed.TargetEntityLogicalName}"
                 : parsed.AttributeType;
-            var actionLabel = string.Equals(parsed.Action, "update", StringComparison.OrdinalIgnoreCase)
-                ? "Update Attribute" : "New Attribute";
+            var actionLabel = parsed.Action?.ToLowerInvariant() switch
+            {
+                "update" => "Update Attribute",
+                "delete" => "Delete Attribute",
+                _ => "New Attribute",
+            };
             var attrDetails = $"{actionLabel}: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName}"
                 + $" | Schema: {parsed.AttributeSchemaName}"
                 + $" | Display: \"{parsed.DisplayName}\""
@@ -385,9 +406,10 @@ public static class CommitPipeline
         // Sort by natural dependency order: web resources before forms (forms may reference web resources)
         var typeOrder = new Dictionary<CommitItemType, int>
         {
-            [CommitItemType.NewAttribute] = 0,
-            [CommitItemType.Entity] = 1,
-            [CommitItemType.OptionSetValue] = 2,
+            [CommitItemType.NewEntity] = -1,
+            [CommitItemType.OptionSetValue] = 0,
+            [CommitItemType.NewAttribute] = 1,
+            [CommitItemType.Entity] = 2,
             [CommitItemType.StatusValue] = 2,
             [CommitItemType.SecurityRoleUpdate] = 3,
             [CommitItemType.WebResourceUpload] = 3,
@@ -411,13 +433,29 @@ public static class CommitPipeline
         };
         commitItems.Sort((a, b) =>
         {
-            var typeCompare = typeOrder.GetValueOrDefault(a.Type, 99).CompareTo(typeOrder.GetValueOrDefault(b.Type, 99));
+            var orderA = GetEffectiveOrder(a, typeOrder);
+            var orderB = GetEffectiveOrder(b, typeOrder);
+            var typeCompare = orderA.CompareTo(orderB);
             if (typeCompare != 0) return typeCompare;
             // Within same type, sort by filename for deterministic ordering
             return string.Compare(Path.GetFileName(a.FilePath), Path.GetFileName(b.FilePath), StringComparison.OrdinalIgnoreCase);
         });
 
         return commitItems;
+    }
+
+    /// <summary>
+    /// Attribute deletes must run after views/forms (which may reference the attribute).
+    /// This returns a late order (17, just before component Delete) for attribute delete actions.
+    /// </summary>
+    private static int GetEffectiveOrder(CommitItem item, Dictionary<CommitItemType, int> typeOrder)
+    {
+        if (item.Type == CommitItemType.NewAttribute && item.ParsedData is NewAttributeDefinition attrDef
+            && string.Equals(attrDef.Action, "delete", StringComparison.OrdinalIgnoreCase))
+        {
+            return 17; // After forms (7), sitemaps (8), etc. — just before Delete (18)
+        }
+        return typeOrder.GetValueOrDefault(item.Type, 99);
     }
 
     /// <summary>
@@ -491,6 +529,12 @@ public static class CommitPipeline
 
             var relativePath = Path.GetRelativePath(pendingDir, item.FilePath).Replace('\\', '/');
 
+            const int maxRetries = 3;
+            const int retryDelayMs = 2000;
+            Exception? lastException = null;
+
+            for (var attempt = 1; attempt <= maxRetries; attempt++)
+            {
             try
             {
                 switch (item.Type)
@@ -822,9 +866,248 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.NewEntity:
+                    {
+                        var def = (NewEntityDefinition)item.ParsedData;
+                        log?.Invoke($"Creating entity: {def.EntityLogicalName} \"{def.DisplayName}\"");
+
+                        var entityMetadata = new EntityMetadata
+                        {
+                            SchemaName = def.EntitySchemaName,
+                            DisplayName = new Label(def.DisplayName, 1030),
+                            DisplayCollectionName = new Label(def.DisplayNamePlural, 1030),
+                            Description = new Label(def.Description ?? def.DisplayName, 1030),
+                            OwnershipType = OwnershipTypes.UserOwned,
+                            IsActivity = false,
+                        };
+
+                        var primaryAttribute = new StringAttributeMetadata
+                        {
+                            SchemaName = def.PrimaryAttributeSchemaName,
+                            MaxLength = def.PrimaryAttributeMaxLength,
+                            DisplayName = new Label(def.PrimaryAttributeDisplayName, 1030),
+                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.ApplicationRequired),
+                        };
+
+                        var createReq = new CreateEntityRequest
+                        {
+                            Entity = entityMetadata,
+                            PrimaryAttribute = primaryAttribute,
+                            HasActivities = false,
+                            HasFeedback = false,
+                            HasNotes = false,
+                        };
+                        createReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+
+                        try
+                        {
+                            var entityResp = (CreateEntityResponse)client.Execute(createReq);
+                            log?.Invoke($"  Entity created OK. ID: {entityResp.EntityId}");
+                        }
+                        catch (System.ServiceModel.FaultException<OrganizationServiceFault> ex)
+                            when (ex.Message.Contains("is not unique") || ex.Message.Contains("already exists"))
+                        {
+                            log?.Invoke($"  Entity already exists — skipping creation, will add fields.");
+                        }
+
+                        // Create additional attributes
+                        if (def.Attributes is { Count: > 0 })
+                        {
+                            foreach (var attr in def.Attributes)
+                            {
+                                log?.Invoke($"  Adding field: {attr.AttributeLogicalName} ({attr.AttributeType})");
+                                try
+                                {
+                                var attrItem = new CommitItem(CommitItemType.NewAttribute,
+                                    $"  Field: {attr.AttributeLogicalName}", item.FilePath, attr);
+                                // Process inline — the switch will handle it on next iteration
+                                // Instead, directly execute the attribute creation here
+                                var attrDef = attr with
+                                {
+                                    EntityLogicalName = attr.EntityLogicalName ?? def.EntityLogicalName,
+                                    SolutionUniqueName = attr.SolutionUniqueName ?? def.SolutionUniqueName,
+                                };
+
+                                if (attrDef.AttributeType.Equals("lookup", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var targetEntity = attrDef.TargetEntityLogicalName
+                                        ?? throw new InvalidOperationException($"targetEntityLogicalName required for lookup {attrDef.AttributeLogicalName}");
+
+                                    var lookupAttr = new LookupAttributeMetadata
+                                    {
+                                        SchemaName = attrDef.AttributeSchemaName,
+                                        DisplayName = new Label(attrDef.DisplayName, 1030),
+                                        RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                    };
+
+                                    var rel = new OneToManyRelationshipMetadata
+                                    {
+                                        SchemaName = attrDef.RelationshipSchemaName
+                                            ?? $"{def.EntitySchemaName}_{attrDef.AttributeSchemaName}_{targetEntity}",
+                                        ReferencedEntity = targetEntity,
+                                        ReferencingEntity = attrDef.EntityLogicalName,
+                                        CascadeConfiguration = new CascadeConfiguration
+                                        {
+                                            Assign = CascadeType.NoCascade,
+                                            Delete = CascadeType.RemoveLink,
+                                            Merge = CascadeType.NoCascade,
+                                            Reparent = CascadeType.NoCascade,
+                                            Share = CascadeType.NoCascade,
+                                            Unshare = CascadeType.NoCascade,
+                                        }
+                                    };
+
+                                    var lookupReq = new CreateOneToManyRequest
+                                    {
+                                        OneToManyRelationship = rel,
+                                        Lookup = lookupAttr
+                                    };
+                                    lookupReq.Parameters["SolutionUniqueName"] = attrDef.SolutionUniqueName;
+                                    client.Execute(lookupReq);
+                                }
+                                else
+                                {
+                                    AttributeMetadata attrMeta = attrDef.AttributeType.ToLowerInvariant() switch
+                                    {
+                                        "string" => new StringAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            MaxLength = attrDef.MaxLength ?? 200,
+                                            FormatName = StringFormatName.Text,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                        },
+                                        "memo" => new MemoAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            MaxLength = attrDef.MaxLength ?? 100000,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                        },
+                                        "picklist" => new PicklistAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                            OptionSet = string.IsNullOrEmpty(attrDef.OptionSetName)
+                                                ? new OptionSetMetadata { IsGlobal = false, OptionSetType = OptionSetType.Picklist }
+                                                : new OptionSetMetadata { Name = attrDef.OptionSetName, IsGlobal = true }
+                                        },
+                                        "int" or "integer" => new IntegerAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            MinValue = 0,
+                                            MaxValue = 2147483647,
+                                            Format = IntegerFormat.None,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                            Description = new Label(attrDef.Description ?? attrDef.DisplayName, 1030),
+                                        },
+                                        "boolean" => new BooleanAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                        },
+                                        _ => throw new InvalidOperationException($"Unsupported type for entity field: {attrDef.AttributeType}")
+                                    };
+
+                                    var createAttrReq = new CreateAttributeRequest
+                                    {
+                                        EntityName = attrDef.EntityLogicalName,
+                                        Attribute = attrMeta
+                                    };
+                                    createAttrReq.Parameters["SolutionUniqueName"] = attrDef.SolutionUniqueName;
+                                    client.Execute(createAttrReq);
+                                }
+                                log?.Invoke($"    Field created OK.");
+                                }
+                                catch (System.ServiceModel.FaultException<OrganizationServiceFault> ex)
+                                    when (ex.Message.Contains("already exists") || ex.Message.Contains("is not unique"))
+                                {
+                                    log?.Invoke($"    Field already exists — skipping.");
+                                }
+                            }
+                        }
+
+                        // Publish the entity
+                        client.Execute(new PublishAllXmlRequest());
+                        log?.Invoke($"  Published.");
+                        break;
+                    }
+
                     case CommitItemType.NewAttribute:
                     {
                         var def = (NewAttributeDefinition)item.ParsedData;
+
+                        // Handle attribute deletion
+                        if (string.Equals(def.Action, "delete", StringComparison.OrdinalIgnoreCase))
+                        {
+                            log?.Invoke($"Deleting attribute: {def.EntityLogicalName}.{def.AttributeLogicalName}");
+
+                            // First retrieve the attribute metadata ID
+                            var retrieveReq = new RetrieveAttributeRequest
+                            {
+                                EntityLogicalName = def.EntityLogicalName,
+                                LogicalName = def.AttributeLogicalName
+                            };
+                            var attrMeta = ((RetrieveAttributeResponse)client.Execute(retrieveReq)).AttributeMetadata;
+                            var attrMetadataId = attrMeta.MetadataId
+                                ?? throw new InvalidOperationException($"Attribute {def.AttributeLogicalName} has no MetadataId");
+
+                            try
+                            {
+                                var deleteReq = new DeleteAttributeRequest
+                                {
+                                    EntityLogicalName = def.EntityLogicalName,
+                                    LogicalName = def.AttributeLogicalName
+                                };
+                                client.Execute(deleteReq);
+                                client.Execute(new PublishAllXmlRequest());
+                                log?.Invoke($"  Attribute deleted and published.");
+                            }
+                            catch (System.ServiceModel.FaultException<OrganizationServiceFault> ex)
+                                when (ex.Message.Contains("cannot be deleted because it is referenced"))
+                            {
+                                // List dependencies for better debugging
+                                var depInfo = new List<string> { "Cannot delete — has dependencies:" };
+                                try
+                                {
+                                    var depReq = new RetrieveDependenciesForDeleteRequest
+                                    {
+                                        ComponentType = 2, // Attribute
+                                        ObjectId = attrMetadataId
+                                    };
+                                    var depResp = (RetrieveDependenciesForDeleteResponse)client.Execute(depReq);
+                                    foreach (var dep in depResp.EntityCollection.Entities)
+                                    {
+                                        var depType = dep.GetAttributeValue<OptionSetValue>("dependentcomponenttype")?.Value;
+                                        var depId = dep.GetAttributeValue<Guid?>("dependentcomponentobjectid");
+                                        var depTypeName = depType switch
+                                        {
+                                            1 => "Entity",
+                                            2 => "Attribute",
+                                            3 => "Relationship",
+                                            26 => "View (SavedQuery)",
+                                            60 => "Form (SystemForm)",
+                                            61 => "Chart",
+                                            _ => $"ComponentType {depType}"
+                                        };
+                                        depInfo.Add($"  • {depTypeName} (ID: {depId})");
+                                    }
+                                }
+                                catch (Exception depEx)
+                                {
+                                    depInfo.Add($"  (Failed to retrieve dependencies: {depEx.Message})");
+                                }
+
+                                var fullMessage = string.Join("\n", depInfo);
+                                log?.Invoke(fullMessage);
+                                throw new InvalidOperationException(fullMessage, ex);
+                            }
+                            break;
+                        }
+
                         var requiredLevel = def.RequiredLevel?.ToLowerInvariant() switch
                         {
                             "required" => AttributeRequiredLevel.ApplicationRequired,
@@ -1212,11 +1495,24 @@ public static class CommitPipeline
             }
             catch (Exception ex)
             {
+                lastException = ex;
+                if (attempt < maxRetries)
+                {
+                    log?.Invoke($"  Attempt {attempt} failed: {ex.Message}");
+                    log?.Invoke($"  Retrying in {retryDelayMs}ms... (attempt {attempt + 1}/{maxRetries})");
+                    System.Threading.Thread.Sleep(retryDelayMs);
+                    continue;
+                }
+
                 failedItem = item;
                 failedException = ex;
-                log?.Invoke($"  FAILED: {ex}");
+                log?.Invoke($"  FAILED after {maxRetries} attempts: {ex}");
                 break; // Stop processing — later items may depend on this one
             }
+            break; // Success — exit retry loop
+            } // end retry loop
+
+            if (failedItem != null) break; // Stop processing items
         }
 
         // Process ribbon workbench items (grouped by entity, one import per entity)

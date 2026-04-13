@@ -93,6 +93,11 @@ try
     {
         await HandleSiteMapCommand(positionalArgs, configuration, noCache);
     }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("new", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleEntityNewCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length >= 3 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
         && positionalArgs[1].Equals("attribute", StringComparison.OrdinalIgnoreCase)
         && positionalArgs[2].Equals("add", StringComparison.OrdinalIgnoreCase))
@@ -1794,6 +1799,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]forms quickcreate edit[/] <guid>                                  Checkout Quick Create form for editing");
     AnsiConsole.MarkupLine("  [bold]sitemap[/] <appmodule-name>                           Checkout a sitemap for editing");
     AnsiConsole.MarkupLine("  [bold]entity[/] <logical-name>                              Checkout entity metadata for editing");
+    AnsiConsole.MarkupLine("  [bold]entity new[/] <schema> --display-name \"<name>\"       Create a new custom entity");
     AnsiConsole.MarkupLine("  [bold]entity attribute add[/] <entity> <name> --type <t>     Add a new field (lookup, string, int, ...)");
     AnsiConsole.MarkupLine("  [bold]icon new[/] <webresource> <svg> [[--entity <e>]]         Stage a new icon upload");
     AnsiConsole.MarkupLine("  [bold]icon set[/] <entity> <webresource>                     Set entity icon to existing resource");
@@ -2375,6 +2381,69 @@ static void HandleRibbonWorkbenchCommand(string[] positionalArgs, string[] allAr
     AnsiConsole.MarkupLine($"  File:     {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// entity new <schema-name> --display-name "<name>" [--plural "<name>"]
+// ──────────────────────────────────────────────────────────────
+static void HandleEntityNewCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync entity new[/] — scaffold a new custom entity");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  entity new <schema-name> --display-name \"<name>\" [--plural \"<name>\"] [--description \"<desc>\"]");
+        AnsiConsole.MarkupLine("    [grey]Schema name should include publisher prefix (e.g. kf_PartnerFormResponse)[/]");
+        AnsiConsole.MarkupLine("    [grey]Example: entity new kf_PartnerFormResponse --display-name \"Partner Form Svar\"[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    var schemaName = positionalArgs[2];
+    var displayName = ParseNamedArg(allArgs, "--display-name") ?? schemaName;
+    var plural = ParseNamedArg(allArgs, "--plural") ?? displayName;
+    var description = ParseNamedArg(allArgs, "--description");
+
+    // Derive logical name from schema name
+    var logicalName = schemaName.ToLowerInvariant();
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Entities");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{logicalName}.entity.json");
+
+    var definition = new NewEntityDefinition
+    {
+        EntityLogicalName = logicalName,
+        EntitySchemaName = schemaName,
+        DisplayName = displayName,
+        DisplayNamePlural = plural,
+        PrimaryAttributeSchemaName = $"{schemaName.Split('_')[0]}_Name",
+        PrimaryAttributeDisplayName = "Navn",
+        SolutionUniqueName = metadata.Solution.UniqueName,
+        Attributes = [],
+    };
+
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Entity definition staged:[/]");
+    AnsiConsole.MarkupLine($"  Schema:       {schemaName}");
+    AnsiConsole.MarkupLine($"  Logical:      {logicalName}");
+    AnsiConsole.MarkupLine($"  Display:      {displayName}");
+    AnsiConsole.MarkupLine($"  Plural:       {plural}");
+    AnsiConsole.MarkupLine($"  Primary Attr: {definition.PrimaryAttributeSchemaName} (\"{definition.PrimaryAttributeDisplayName}\")");
+    AnsiConsole.MarkupLine($"  Solution:     {definition.SolutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:         {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the JSON file to add attributes, then run [blue]commit[/].[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -5145,6 +5214,15 @@ static string FormatCommitItemDetails(CommitItem item)
         var lines = new List<string> { Markup.Escape(item.DisplayName) };
         foreach (var val in osDef.Values)
             lines.Add($"  [grey]• \"{Markup.Escape(val.Label)}\" = {(val.Value.HasValue ? val.Value.Value.ToString() : "auto")}[/]");
+        return string.Join("\n", lines);
+    }
+
+    if (item.Type == CommitItemType.NewEntity && item.ParsedData is NewEntityDefinition entityDef)
+    {
+        var lines = new List<string> { Markup.Escape(item.DisplayName) };
+        if (entityDef.Attributes is { Count: > 0 })
+            foreach (var attr in entityDef.Attributes)
+                lines.Add($"  [grey]• {Markup.Escape(attr.AttributeSchemaName)} ({Markup.Escape(attr.AttributeType)}): \"{Markup.Escape(attr.DisplayName)}\"[/]");
         return string.Join("\n", lines);
     }
 

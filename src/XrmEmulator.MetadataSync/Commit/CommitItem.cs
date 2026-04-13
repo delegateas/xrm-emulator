@@ -14,6 +14,7 @@ public enum CommitItemType
     BusinessRule,
     Delete,
     Deprecate,
+    NewEntity,
     NewAttribute,
     WebResourceUpload,
     CommandBar,
