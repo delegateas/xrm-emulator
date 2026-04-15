@@ -386,6 +386,19 @@ public static class CommitPipeline
                 $"PCF Control: {parsed.Name}", f, parsed));
         }
 
+        // Solution component additions (add existing attribute/entity to solution)
+        var pendingSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.solutioncomponent.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSolutionComponentFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SolutionComponentDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.AddSolutionComponent,
+                $"Add to Solution: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({parsed.ComponentType})",
+                f, parsed));
+        }
+
         // Ribbon Workbench actions (hide, etc.)
         var pendingRibbonFiles = Directory.GetFiles(pendingDir, "*.json", SearchOption.AllDirectories)
             .Where(f => f.Contains(Path.Combine("RibbonWorkbench"), StringComparison.OrdinalIgnoreCase)
@@ -409,6 +422,7 @@ public static class CommitPipeline
             [CommitItemType.NewEntity] = -1,
             [CommitItemType.OptionSetValue] = 0,
             [CommitItemType.NewAttribute] = 1,
+            [CommitItemType.AddSolutionComponent] = 2,
             [CommitItemType.Entity] = 2,
             [CommitItemType.StatusValue] = 2,
             [CommitItemType.SecurityRoleUpdate] = 3,
@@ -993,6 +1007,15 @@ public static class CommitPipeline
                                                 ? new OptionSetMetadata { IsGlobal = false, OptionSetType = OptionSetType.Picklist }
                                                 : new OptionSetMetadata { Name = attrDef.OptionSetName, IsGlobal = true }
                                         },
+                                        "multiselectpicklist" => new MultiSelectPicklistAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                            OptionSet = string.IsNullOrEmpty(attrDef.OptionSetName)
+                                                ? new OptionSetMetadata { IsGlobal = false, OptionSetType = OptionSetType.Picklist }
+                                                : new OptionSetMetadata { Name = attrDef.OptionSetName, IsGlobal = true }
+                                        },
                                         "int" or "integer" => new IntegerAttributeMetadata
                                         {
                                             SchemaName = attrDef.AttributeSchemaName,
@@ -1008,6 +1031,9 @@ public static class CommitPipeline
                                             SchemaName = attrDef.AttributeSchemaName,
                                             DisplayName = new Label(attrDef.DisplayName, 1030),
                                             RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                            OptionSet = new BooleanOptionSetMetadata(
+                                                new OptionMetadata(new Label("Ja", 1030), 1),
+                                                new OptionMetadata(new Label("Nej", 1030), 0))
                                         },
                                         _ => throw new InvalidOperationException($"Unsupported type for entity field: {attrDef.AttributeType}")
                                     };
@@ -1115,7 +1141,61 @@ public static class CommitPipeline
                             _ => AttributeRequiredLevel.None
                         };
 
-                        if (def.AttributeType.Equals("lookup", StringComparison.OrdinalIgnoreCase))
+                        if (def.AttributeType.Equals("customer", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Customer lookup: polymorphic lookup targeting both Account and Contact.
+                            // CreateCustomerRelationshipsRequest is not available as a typed class in
+                            // CrmSdk.CoreAssemblies 9.x, so we use an untyped OrganizationRequest.
+                            log?.Invoke($"Creating customer lookup: {def.EntityLogicalName}.{def.AttributeLogicalName} → account + contact");
+
+                            var lookupAttr = new LookupAttributeMetadata
+                            {
+                                SchemaName = def.AttributeSchemaName,
+                                DisplayName = new Label(def.DisplayName, 1030),
+                                RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                                Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
+                            };
+
+                            var prefix = def.AttributeSchemaName.Contains("_")
+                                ? def.AttributeSchemaName.Substring(0, def.AttributeSchemaName.IndexOf('_') + 1)
+                                : "";
+                            var baseName = def.AttributeSchemaName.Substring(prefix.Length);
+
+                            var cascade = new CascadeConfiguration
+                            {
+                                Assign = CascadeType.NoCascade,
+                                Delete = CascadeType.RemoveLink,
+                                Merge = CascadeType.NoCascade,
+                                Reparent = CascadeType.NoCascade,
+                                Share = CascadeType.NoCascade,
+                                Unshare = CascadeType.NoCascade
+                            };
+
+                            var relAccount = new OneToManyRelationshipMetadata
+                            {
+                                SchemaName = $"{prefix}{def.EntityLogicalName}_{baseName}_account",
+                                ReferencedEntity = "account",
+                                ReferencingEntity = def.EntityLogicalName,
+                                CascadeConfiguration = cascade
+                            };
+                            var relContact = new OneToManyRelationshipMetadata
+                            {
+                                SchemaName = $"{prefix}{def.EntityLogicalName}_{baseName}_contact",
+                                ReferencedEntity = "contact",
+                                ReferencingEntity = def.EntityLogicalName,
+                                CascadeConfiguration = cascade
+                            };
+
+                            var createReq = new OrganizationRequest("CreateCustomerRelationships");
+                            createReq["Lookup"] = lookupAttr;
+                            createReq["OneToManyRelationships"] = new[] { relAccount, relContact };
+                            createReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+
+                            var resp = client.Execute(createReq);
+                            var attrId = (Guid)resp.Results["AttributeId"];
+                            log?.Invoke($"  Customer lookup created OK. Attribute ID: {attrId}");
+                        }
+                        else if (def.AttributeType.Equals("lookup", StringComparison.OrdinalIgnoreCase))
                         {
                             var targetEntity = def.TargetEntityLogicalName
                                 ?? throw new InvalidOperationException("targetEntityLogicalName is required for lookup attributes");
@@ -1202,9 +1282,22 @@ public static class CommitPipeline
                                     SchemaName = def.AttributeSchemaName,
                                     DisplayName = new Label(def.DisplayName, 1030),
                                     RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
-                                    Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
+                                    Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030),
+                                    OptionSet = new BooleanOptionSetMetadata(
+                                        new OptionMetadata(new Label("Ja", 1030), 1),
+                                        new OptionMetadata(new Label("Nej", 1030), 0))
                                 },
                                 "picklist" => new PicklistAttributeMetadata
+                                {
+                                    SchemaName = def.AttributeSchemaName,
+                                    DisplayName = new Label(def.DisplayName, 1030),
+                                    RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                                    Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030),
+                                    OptionSet = string.IsNullOrEmpty(def.OptionSetName)
+                                        ? new OptionSetMetadata { IsGlobal = false, OptionSetType = OptionSetType.Picklist }
+                                        : new OptionSetMetadata { Name = def.OptionSetName, IsGlobal = true }
+                                },
+                                "multiselectpicklist" => new MultiSelectPicklistAttributeMetadata
                                 {
                                     SchemaName = def.AttributeSchemaName,
                                     DisplayName = new Label(def.DisplayName, 1030),
@@ -1260,6 +1353,41 @@ public static class CommitPipeline
                                 var resp = (CreateAttributeResponse)client.Execute(createReq);
                                 log?.Invoke($"  Attribute created OK. ID: {resp.AttributeId}");
                             }
+                        }
+                        break;
+                    }
+
+                    case CommitItemType.AddSolutionComponent:
+                    {
+                        var def = (SolutionComponentDefinition)item.ParsedData;
+                        log?.Invoke($"Adding existing component to solution: {def.EntityLogicalName}.{def.AttributeLogicalName}");
+
+                        if (def.ComponentType.Equals("attribute", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Resolve the attribute's MetadataId from CRM
+                            var retrieveReq = new RetrieveAttributeRequest
+                            {
+                                EntityLogicalName = def.EntityLogicalName,
+                                LogicalName = def.AttributeLogicalName,
+                                RetrieveAsIfPublished = true
+                            };
+                            var retrieveResp = (RetrieveAttributeResponse)client.Execute(retrieveReq);
+                            var metadataId = retrieveResp.AttributeMetadata.MetadataId
+                                ?? throw new InvalidOperationException($"Attribute {def.EntityLogicalName}.{def.AttributeLogicalName} has no MetadataId");
+
+                            var addReq = new AddSolutionComponentRequest
+                            {
+                                ComponentType = 2, // Attribute
+                                ComponentId = metadataId,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            };
+                            client.Execute(addReq);
+                            log?.Invoke($"  Attribute added to solution {def.SolutionUniqueName}. MetadataId: {metadataId}");
+                        }
+                        else
+                        {
+                            throw new InvalidOperationException($"Unsupported solution component type: {def.ComponentType}");
                         }
                         break;
                     }

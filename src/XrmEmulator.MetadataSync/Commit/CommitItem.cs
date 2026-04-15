@@ -25,7 +25,8 @@ public enum CommitItemType
     SecurityRoleUpdate,
     PcfControl,
     OptionSetValue,
-    StatusValue
+    StatusValue,
+    AddSolutionComponent
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

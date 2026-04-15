@@ -164,6 +164,11 @@ try
     {
         HandleOptionSetCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("solution", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("add-component", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleSolutionAddComponentCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("query", StringComparison.OrdinalIgnoreCase))
     {
         await HandleQueryCommand(positionalArgs, args, configuration, noCache);
@@ -2562,6 +2567,70 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
 }
 
 // ──────────────────────────────────────────────────────────────
+// solution add-component --type attribute --entity <entity> --attribute <attr>
+// ──────────────────────────────────────────────────────────────
+static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] allArgs)
+{
+    var componentType = ParseNamedArg(allArgs, "--type");
+    var entityLogicalName = ParseNamedArg(allArgs, "--entity");
+    var attributeLogicalName = ParseNamedArg(allArgs, "--attribute");
+
+    if (string.IsNullOrEmpty(componentType) || string.IsNullOrEmpty(entityLogicalName) || string.IsNullOrEmpty(attributeLogicalName))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync solution add-component --type attribute --entity <entity> --attribute <attribute>");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Adds an existing attribute (created in another solution) to this solution.[/]");
+        AnsiConsole.MarkupLine("[grey]Example: solution add-component --type attribute --entity lead --attribute kf_existingcustomer[/]");
+        Environment.Exit(1);
+    }
+
+    if (!componentType.Equals("attribute", StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine($"[red]Unsupported component type: {componentType}. Currently only 'attribute' is supported.[/]");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    var definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+    {
+        EntityLogicalName = entityLogicalName.ToLowerInvariant(),
+        AttributeLogicalName = attributeLogicalName.ToLowerInvariant(),
+        ComponentType = componentType.ToLowerInvariant(),
+        DisplayName = attributeLogicalName,
+        SolutionUniqueName = solutionUniqueName
+    };
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SolutionComponents");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{entityLogicalName}_{attributeLogicalName}.solutioncomponent.json");
+    File.WriteAllText(destPath, System.Text.Json.JsonSerializer.Serialize(definition, new System.Text.Json.JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged solution component:[/]");
+    AnsiConsole.MarkupLine($"  Type:       {componentType}");
+    AnsiConsole.MarkupLine($"  Entity:     {entityLogicalName}");
+    AnsiConsole.MarkupLine($"  Attribute:  {attributeLogicalName}");
+    AnsiConsole.MarkupLine($"  Solution:   {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:       {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to add to solution.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
 // query <table> [--select col1,col2] [--filter field=value] [--top N]
 // ──────────────────────────────────────────────────────────────
 static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
@@ -4421,6 +4490,16 @@ static void HandlePendingCommand()
         var parsed = JsonSerializer.Deserialize<SecurityRoleUpdateDefinition>(File.ReadAllText(f),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
         items.Add(("Security Role", $"{parsed.RoleName} ({parsed.Privileges.Count} privileges)", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.solutioncomponent.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSolutionComponentFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SolutionComponentDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Add to Solution", $"{parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({parsed.ComponentType})", Path.GetRelativePath(pendingDir, f)));
     }
 
     if (items.Count == 0)

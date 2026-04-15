@@ -83,6 +83,23 @@ public static class BusinessRuleWriter
 
     public static void Update(IOrganizationService service, BusinessRuleDefinition rule)
     {
+        // Check if the workflow is currently activated (statecode=1).
+        // Published workflows must be deactivated before updating.
+        var existing = service.Retrieve("workflow", rule.WorkflowId, new ColumnSet("statecode"));
+        var stateCode = existing.GetAttributeValue<OptionSetValue>("statecode")?.Value;
+        var wasActivated = stateCode == 1;
+
+        if (wasActivated)
+        {
+            var deactivate = new SetStateRequest
+            {
+                EntityMoniker = new EntityReference("workflow", rule.WorkflowId),
+                State = new OptionSetValue(0),   // Draft
+                Status = new OptionSetValue(1),  // Draft
+            };
+            service.Execute(deactivate);
+        }
+
         var entity = new Entity("workflow", rule.WorkflowId);
         entity["name"] = rule.Name;
         entity["xaml"] = rule.Xaml;
@@ -91,5 +108,16 @@ public static class BusinessRuleWriter
             entity["description"] = rule.Description;
 
         service.Update(entity);
+
+        if (wasActivated)
+        {
+            var activate = new SetStateRequest
+            {
+                EntityMoniker = new EntityReference("workflow", rule.WorkflowId),
+                State = new OptionSetValue(1),   // Activated
+                Status = new OptionSetValue(2),  // Activated
+            };
+            service.Execute(activate);
+        }
     }
 }
