@@ -84,6 +84,75 @@ public static class AppModuleWriter
         }
     }
 
+    public static void AddBpf(
+        IOrganizationService service,
+        string appModuleUniqueName,
+        string bpfName,
+        string? primaryEntity = null)
+    {
+        var appModuleId = GetAppModuleId(service, appModuleUniqueName);
+        var workflowId = ResolveBpfWorkflowId(service, bpfName, primaryEntity);
+
+        service.Execute(new AddAppComponentsRequest
+        {
+            AppId = appModuleId,
+            Components = new EntityReferenceCollection
+            {
+                new EntityReference("workflow", workflowId)
+            }
+        });
+    }
+
+    public static void RemoveBpf(
+        IOrganizationService service,
+        string appModuleUniqueName,
+        string bpfName,
+        string? primaryEntity = null)
+    {
+        var appModuleId = GetAppModuleId(service, appModuleUniqueName);
+        var workflowId = ResolveBpfWorkflowId(service, bpfName, primaryEntity);
+
+        service.Execute(new RemoveAppComponentsRequest
+        {
+            AppId = appModuleId,
+            Components = new EntityReferenceCollection
+            {
+                new EntityReference("workflow", workflowId)
+            }
+        });
+    }
+
+    private static Guid ResolveBpfWorkflowId(IOrganizationService service, string bpfName, string? primaryEntity)
+    {
+        var query = new QueryExpression("workflow")
+        {
+            ColumnSet = new ColumnSet("workflowid", "name", "primaryentity"),
+            Criteria = new FilterExpression(LogicalOperator.And)
+            {
+                Conditions =
+                {
+                    new ConditionExpression("name", ConditionOperator.Equal, bpfName),
+                    new ConditionExpression("category", ConditionOperator.Equal, 4),
+                }
+            },
+        };
+        if (!string.IsNullOrEmpty(primaryEntity))
+            query.Criteria.Conditions.Add(
+                new ConditionExpression("primaryentity", ConditionOperator.Equal, primaryEntity));
+
+        var results = service.RetrieveMultiple(query);
+        if (results.Entities.Count == 0)
+            throw new InvalidOperationException($"Business Process Flow named '{bpfName}' not found in CRM.");
+        if (results.Entities.Count > 1)
+        {
+            var matches = string.Join(", ", results.Entities.Select(e =>
+                $"{e.GetAttributeValue<string>("name")} (on {e.GetAttributeValue<string>("primaryentity")})"));
+            throw new InvalidOperationException(
+                $"Multiple BPFs named '{bpfName}' found: {matches}. Use --entity to disambiguate.");
+        }
+        return results.Entities[0].Id;
+    }
+
     public static void UpdateFormSelection(
         IOrganizationService service,
         string appModuleUniqueName,

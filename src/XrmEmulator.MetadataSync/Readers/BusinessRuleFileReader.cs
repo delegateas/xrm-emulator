@@ -58,10 +58,21 @@ public static class BusinessRuleFileReader
         var primaryEntity = workflowElement.Element("PrimaryEntity")?.Value
             ?? throw new InvalidOperationException($"Missing <PrimaryEntity> element in {sourceFilePath}");
 
+        var category = 2; // Default: Business Rule
+        var categoryElement = workflowElement.Element("Category");
+        if (categoryElement != null && int.TryParse(categoryElement.Value, out var parsedCategory))
+            category = parsedCategory;
+
         var scope = 4; // Default: Organization
         var scopeElement = workflowElement.Element("Scope");
         if (scopeElement != null && int.TryParse(scopeElement.Value, out var parsedScope))
             scope = parsedScope;
+
+        // BPFs (category=4) should be activated after creation so Dynamics creates the backing entity
+        var activateOnCreate = false;
+        var stateCodeElement = workflowElement.Element("StateCode");
+        if (stateCodeElement != null && int.TryParse(stateCodeElement.Value, out var stateCode))
+            activateOnCreate = stateCode == 1; // 1 = Activated
 
         Guid? processTriggerFormId = null;
         var formIdElement = workflowElement.Element("ProcessTriggerFormId");
@@ -83,9 +94,11 @@ public static class BusinessRuleFileReader
             Description = description,
             PrimaryEntity = primaryEntity,
             Xaml = xaml,
+            Category = category,
             Scope = scope,
             ProcessTriggerFormId = processTriggerFormId,
             ProcessTriggerScope = processTriggerScope,
+            ActivateOnCreate = activateOnCreate,
             SourceFilePath = sourceFilePath
         };
     }

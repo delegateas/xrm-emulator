@@ -44,11 +44,16 @@ public static class CommitPipeline
                 || f.Contains("Icons\\", StringComparison.OrdinalIgnoreCase))
                 && !f.Contains("AppModuleViews", StringComparison.OrdinalIgnoreCase)
                 && !f.Contains("AppModuleEntities", StringComparison.OrdinalIgnoreCase)
-                && !f.Contains("AppModuleForms", StringComparison.OrdinalIgnoreCase))
+                && !f.Contains("AppModuleForms", StringComparison.OrdinalIgnoreCase)
+                && !f.Contains("AppModuleBpfs", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var pendingAppModuleEntityFiles = Directory.GetFiles(pendingDir, "*.json", SearchOption.AllDirectories)
             .Where(f => f.Contains("AppModuleEntities", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var pendingAppModuleBpfFiles = Directory.GetFiles(pendingDir, "*.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("AppModuleBpfs", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var pendingAppModuleViewFiles = Directory.GetFiles(pendingDir, "*.json", SearchOption.AllDirectories)
@@ -143,6 +148,21 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        foreach (var f in pendingAppModuleBpfFiles)
+        {
+            var jsonContent = File.ReadAllText(f);
+            var parsed = JsonSerializer.Deserialize<AppModuleBpfDefinition>(jsonContent, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            })!;
+            var bpfActionLabel = parsed.Action.Equals("remove", StringComparison.OrdinalIgnoreCase)
+                ? "AppModule BPF (remove)"
+                : "AppModule BPF (add)";
+            commitItems.Add(new CommitItem(CommitItemType.AppModuleBpf,
+                $"{bpfActionLabel}: {parsed.AppModuleUniqueName} / {parsed.BpfName}",
+                f, parsed));
+        }
+
         foreach (var f in pendingAppModuleViewFiles)
         {
             var jsonContent = File.ReadAllText(f);
@@ -219,8 +239,9 @@ public static class CommitPipeline
             {
                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             })!;
+            var cascadeTag = parsed.Cascade ? " (cascade)" : "";
             commitItems.Add(new CommitItem(CommitItemType.Delete,
-                $"Delete {parsed.EntityType}: {parsed.DisplayName} ({parsed.ComponentId})", f, parsed));
+                $"Delete {parsed.EntityType}: {parsed.DisplayName} ({parsed.ComponentId}){cascadeTag}", f, parsed));
         }
 
         foreach (var f in pendingDeprecateFiles)
@@ -297,6 +318,19 @@ public static class CommitPipeline
             var stepCount = parsed.Types.SelectMany(t => t.Steps).Count();
             commitItems.Add(new CommitItem(CommitItemType.PluginRegistration,
                 $"Plugin: {parsed.AssemblyName} ({parsed.Types.Count} type(s), {stepCount} step(s))",
+                f, parsed));
+        }
+
+        // Custom API registrations
+        var pendingCustomApiFiles = Directory.GetFiles(pendingDir, "*.customapi.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("CustomApis", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var f in pendingCustomApiFiles)
+        {
+            var parsed = CustomApiFileReader.Parse(f);
+            commitItems.Add(new CommitItem(CommitItemType.CustomApiRegistration,
+                $"Custom API: {parsed.UniqueName} ({parsed.RequestParameters.Count} param(s), {parsed.ResponseProperties.Count} prop(s))",
                 f, parsed));
         }
 
@@ -386,6 +420,32 @@ public static class CommitPipeline
                 $"PCF Control: {parsed.Name}", f, parsed));
         }
 
+        // SLA items
+        var pendingSlaItemFiles = Directory.GetFiles(pendingDir, "*.slaitem.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSlaItemFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SlaItemDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SlaItem,
+                $"SLA Item: {parsed.Name} (fail: {parsed.FailureAfter}min, warn: {parsed.WarnAfter}min)",
+                f, parsed));
+        }
+
+        // SLA KPIs
+        var pendingSlaKpiFiles = Directory.GetFiles(pendingDir, "*.slakpi.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSlaKpiFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SlaKpiDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SlaKpi,
+                $"SLA KPI: {parsed.Name} (entity: {parsed.EntityName}, field: {parsed.KpiField})",
+                f, parsed));
+        }
+
         // Solution component additions (add existing attribute/entity to solution)
         var pendingSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.solutioncomponent.json", SearchOption.AllDirectories)
             .ToList();
@@ -396,6 +456,19 @@ public static class CommitPipeline
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
             commitItems.Add(new CommitItem(CommitItemType.AddSolutionComponent,
                 $"Add to Solution: {parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({parsed.ComponentType})",
+                f, parsed));
+        }
+
+        // Enable change tracking
+        var pendingChangeTrackingFiles = Directory.GetFiles(pendingDir, "*.enablechangetracking.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingChangeTrackingFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<EnableChangeTrackingDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.EnableChangeTracking,
+                $"Enable Change Tracking: {parsed.EntityLogicalName}",
                 f, parsed));
         }
 
@@ -419,8 +492,8 @@ public static class CommitPipeline
         // Sort by natural dependency order: web resources before forms (forms may reference web resources)
         var typeOrder = new Dictionary<CommitItemType, int>
         {
-            [CommitItemType.NewEntity] = -1,
-            [CommitItemType.OptionSetValue] = 0,
+            [CommitItemType.OptionSetValue] = -1,
+            [CommitItemType.NewEntity] = 0,
             [CommitItemType.NewAttribute] = 1,
             [CommitItemType.AddSolutionComponent] = 2,
             [CommitItemType.Entity] = 2,
@@ -434,16 +507,21 @@ public static class CommitPipeline
             [CommitItemType.SiteMap] = 8,
             [CommitItemType.BusinessRule] = 9,
             [CommitItemType.AppModuleEntity] = 10,
+            [CommitItemType.AppModuleBpf] = 10,
             [CommitItemType.AppModuleView] = 11,
             [CommitItemType.AppModuleForm] = 12,
             [CommitItemType.CommandBar] = 13,
             [CommitItemType.PcfControl] = 14,
             [CommitItemType.PluginRegistration] = 15,
+            [CommitItemType.CustomApiRegistration] = 15, // Same as plugin — runs after assembly but references plugin type
+            [CommitItemType.SlaKpi] = 14,  // Before SLA items — items reference KPIs
+            [CommitItemType.SlaItem] = 15,
             [CommitItemType.DataImport] = 16,
             [CommitItemType.RelationshipUpdate] = 17,
             [CommitItemType.Delete] = 18,
             [CommitItemType.Deprecate] = 19,
             [CommitItemType.RibbonWorkbench] = 20,
+            [CommitItemType.EnableChangeTracking] = 2,
         };
         commitItems.Sort((a, b) =>
         {
@@ -694,6 +772,24 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.AppModuleBpf:
+                    {
+                        var def = (AppModuleBpfDefinition)item.ParsedData;
+                        if (def.Action.Equals("remove", StringComparison.OrdinalIgnoreCase))
+                        {
+                            log?.Invoke($"Removing BPF from AppModule: {def.AppModuleUniqueName} / {def.BpfName}");
+                            AppModuleWriter.RemoveBpf(client, def.AppModuleUniqueName, def.BpfName, def.PrimaryEntity);
+                            log?.Invoke($"  BPF removed OK.");
+                        }
+                        else
+                        {
+                            log?.Invoke($"Adding BPF to AppModule: {def.AppModuleUniqueName} / {def.BpfName}");
+                            AppModuleWriter.AddBpf(client, def.AppModuleUniqueName, def.BpfName, def.PrimaryEntity);
+                            log?.Invoke($"  BPF added OK.");
+                        }
+                        break;
+                    }
+
                     case CommitItemType.AppModuleView:
                     {
                         var jsonContent = resolvedContent ?? File.ReadAllText(item.FilePath);
@@ -770,42 +866,45 @@ public static class CommitPipeline
                             ? BusinessRuleFileReader.ParseFromString(resolvedContent, item.FilePath)
                             : (BusinessRuleDefinition)item.ParsedData;
 
+                        var isBpf = rule.Category == 4;
+                        var typeLabel = isBpf ? "BPF" : "business rule";
+
                         var isNew = rule.WorkflowId == Guid.Empty;
                         if (isNew)
                         {
-                            // Check for existing business rule with the same name
-                            var existingId = BusinessRuleWriter.FindExistingByName(client, rule.Name, rule.PrimaryEntity);
+                            // Check for existing workflow with the same name and category
+                            var existingId = BusinessRuleWriter.FindExistingByName(client, rule.Name, rule.PrimaryEntity, rule.Category);
                             if (existingId.HasValue)
                             {
                                 var shouldOverride = confirm?.Invoke(
-                                    $"A business rule named '{rule.Name}' already exists on {rule.PrimaryEntity} (ID: {existingId.Value}). Override it?")
+                                    $"A {typeLabel} named '{rule.Name}' already exists on {rule.PrimaryEntity} (ID: {existingId.Value}). Override it?")
                                     ?? true; // Default to yes if no confirm callback (non-interactive)
 
                                 if (!shouldOverride)
                                 {
-                                    log?.Invoke($"  Skipped: user chose not to override existing business rule.");
+                                    log?.Invoke($"  Skipped: user chose not to override existing {typeLabel}.");
                                     break;
                                 }
 
-                                log?.Invoke($"Updating existing business rule: {rule.Name} ({existingId.Value})");
+                                log?.Invoke($"Updating existing {typeLabel}: {rule.Name} ({existingId.Value})");
                                 var updated = rule with { WorkflowId = existingId.Value };
                                 BusinessRuleWriter.Update(client, updated);
-                                log?.Invoke($"  Business rule updated OK. ID: {existingId.Value}");
+                                log?.Invoke($"  {typeLabel} updated OK. ID: {existingId.Value}");
                                 resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = existingId.Value.ToString() };
                             }
                             else
                             {
-                                log?.Invoke($"Creating new business rule: {item.DisplayName} (entity: {rule.PrimaryEntity})");
+                                log?.Invoke($"Creating new {typeLabel}: {item.DisplayName} (entity: {rule.PrimaryEntity})");
                                 var newId = BusinessRuleWriter.Create(client, rule, metadata.Solution.UniqueName);
-                                log?.Invoke($"  Business rule created OK. ID: {newId}");
+                                log?.Invoke($"  {typeLabel} created OK. ID: {newId}");
                                 resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = newId.ToString() };
                             }
                         }
                         else
                         {
-                            log?.Invoke($"Updating business rule: {item.DisplayName}");
+                            log?.Invoke($"Updating {typeLabel}: {item.DisplayName}");
                             BusinessRuleWriter.Update(client, rule);
-                            log?.Invoke($"  Business rule updated OK.");
+                            log?.Invoke($"  {typeLabel} updated OK.");
                             resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = rule.WorkflowId.ToString() };
                         }
                         break;
@@ -841,6 +940,12 @@ public static class CommitPipeline
                         log?.Invoke($"Deleting {def.EntityType}: {def.DisplayName} ({componentId})");
                         try
                         {
+                            if (def.Cascade)
+                            {
+                                log?.Invoke($"  Cascade mode: discovering restrict-delete children...");
+                                CascadeDeleteRestrictChildren(client, def.EntityType, componentId, log, new HashSet<(string, Guid)>());
+                            }
+
                             client.Delete(def.EntityType, componentId);
                             log?.Invoke($"  Deleted OK.");
                         }
@@ -1035,6 +1140,20 @@ public static class CommitPipeline
                                                 new OptionMetadata(new Label("Ja", 1030), 1),
                                                 new OptionMetadata(new Label("Nej", 1030), 0))
                                         },
+                                        "datetime" => new DateTimeAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            Format = DateTimeFormat.DateAndTime,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                        },
+                                        "decimal" => new DecimalAttributeMetadata
+                                        {
+                                            SchemaName = attrDef.AttributeSchemaName,
+                                            DisplayName = new Label(attrDef.DisplayName, 1030),
+                                            RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
+                                            Precision = 2,
+                                        },
                                         _ => throw new InvalidOperationException($"Unsupported type for entity field: {attrDef.AttributeType}")
                                     };
 
@@ -1047,6 +1166,13 @@ public static class CommitPipeline
                                     client.Execute(createAttrReq);
                                 }
                                 log?.Invoke($"    Field created OK.");
+
+                                // Insert local picklist options if defined
+                                if (attrDef.Options is { Count: > 0 } && string.IsNullOrEmpty(attrDef.OptionSetName))
+                                {
+                                    InsertLocalOptionValues(client, attrDef.EntityLogicalName ?? def.EntityLogicalName,
+                                        attrDef.AttributeLogicalName, attrDef.Options, attrDef.SolutionUniqueName ?? def.SolutionUniqueName, log);
+                                }
                                 }
                                 catch (System.ServiceModel.FaultException<OrganizationServiceFault> ex)
                                     when (ex.Message.Contains("already exists") || ex.Message.Contains("is not unique"))
@@ -1340,6 +1466,13 @@ public static class CommitPipeline
                                 updateReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
                                 client.Execute(updateReq);
                                 log?.Invoke($"  Attribute updated OK.");
+
+                                // Insert new local picklist options if defined (additive — existing values are skipped)
+                                if (def.Options is { Count: > 0 } && string.IsNullOrEmpty(def.OptionSetName))
+                                {
+                                    InsertLocalOptionValues(client, def.EntityLogicalName, def.AttributeLogicalName,
+                                        def.Options, def.SolutionUniqueName, log);
+                                }
                             }
                             else
                             {
@@ -1352,6 +1485,13 @@ public static class CommitPipeline
 
                                 var resp = (CreateAttributeResponse)client.Execute(createReq);
                                 log?.Invoke($"  Attribute created OK. ID: {resp.AttributeId}");
+
+                                // Insert local picklist options if defined
+                                if (def.Options is { Count: > 0 } && string.IsNullOrEmpty(def.OptionSetName))
+                                {
+                                    InsertLocalOptionValues(client, def.EntityLogicalName, def.AttributeLogicalName,
+                                        def.Options, def.SolutionUniqueName, log);
+                                }
                             }
                         }
                         break;
@@ -1384,6 +1524,18 @@ public static class CommitPipeline
                             };
                             client.Execute(addReq);
                             log?.Invoke($"  Attribute added to solution {def.SolutionUniqueName}. MetadataId: {metadataId}");
+                        }
+                        else if (def.ComponentType.Equals("sla", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var addReq = new AddSolutionComponentRequest
+                            {
+                                ComponentType = 152, // SLA
+                                ComponentId = Guid.Parse(def.AttributeLogicalName), // Reusing field for the SLA ID
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = true
+                            };
+                            client.Execute(addReq);
+                            log?.Invoke($"  SLA added to solution {def.SolutionUniqueName}.");
                         }
                         else
                         {
@@ -1516,6 +1668,16 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.CustomApiRegistration:
+                    {
+                        var def = (CustomApiDefinition)item.ParsedData;
+                        log?.Invoke($"Registering Custom API: {def.UniqueName}");
+                        var apiId = CustomApiWriter.Upsert(client, def, log);
+                        log?.Invoke($"  Custom API registered OK. ID: {apiId}");
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = apiId.ToString() };
+                        break;
+                    }
+
                     case CommitItemType.PcfControl:
                     {
                         var def = (PcfControlDefinition)item.ParsedData;
@@ -1556,6 +1718,97 @@ public static class CommitPipeline
                         var def = (StatusValueDefinition)item.ParsedData;
                         log?.Invoke($"Updating status values: {def.EntityLogicalName}");
                         StatusValueWriter.Apply(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.EnableChangeTracking:
+                    {
+                        var def = (EnableChangeTrackingDefinition)item.ParsedData;
+                        log?.Invoke($"Enabling change tracking: {def.EntityLogicalName}");
+                        EnableChangeTrackingWriter.Execute(client, def);
+                        log?.Invoke($"  OK.");
+                        break;
+                    }
+
+                    case CommitItemType.SlaKpi:
+                    {
+                        var def = (SlaKpiDefinition)item.ParsedData;
+                        log?.Invoke($"Creating SLA KPI: {def.Name}");
+
+                        var kpiEntity = new Entity("msdyn_slakpi");
+                        kpiEntity["msdyn_name"] = def.Name;
+                        kpiEntity["msdyn_entityname"] = def.EntityName;
+                        kpiEntity["msdyn_kpifield"] = def.KpiField;
+                        kpiEntity["msdyn_applicablefromfield"] = def.ApplicableFromField;
+
+                        var newKpiId = client.Create(kpiEntity);
+                        log?.Invoke($"  SLA KPI created. ID: {newKpiId}");
+
+                        // Activate the KPI
+                        var activateKpi = new SetStateRequest
+                        {
+                            EntityMoniker = new EntityReference("msdyn_slakpi", newKpiId),
+                            State = new OptionSetValue(1),  // Active
+                            Status = new OptionSetValue(2)  // Active
+                        };
+                        client.Execute(activateKpi);
+                        log?.Invoke($"  SLA KPI activated.");
+
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = newKpiId.ToString() };
+                        break;
+                    }
+
+                    case CommitItemType.SlaItem:
+                    {
+                        var def = (SlaItemDefinition)item.ParsedData;
+                        log?.Invoke($"Creating SLA Item: {def.Name}");
+
+                        // Check if parent SLA is active, deactivate if needed
+                        var slaRef = new EntityReference("sla", Guid.Parse(def.SlaId));
+                        var sla = client.Retrieve("sla", slaRef.Id, new ColumnSet("statecode"));
+                        var wasActive = sla.GetAttributeValue<OptionSetValue>("statecode")?.Value == 1;
+
+                        if (wasActive)
+                        {
+                            log?.Invoke("  Deactivating parent SLA...");
+                            var deactivate = new SetStateRequest
+                            {
+                                EntityMoniker = slaRef,
+                                State = new OptionSetValue(0),  // Draft
+                                Status = new OptionSetValue(1)  // Draft
+                            };
+                            client.Execute(deactivate);
+                            log?.Invoke("  SLA deactivated.");
+                        }
+
+                        // Create the SLA item
+                        var slaItem = new Entity("slaitem");
+                        slaItem["name"] = def.Name;
+                        slaItem["slaid"] = slaRef;
+                        slaItem["msdyn_slakpiid"] = new EntityReference("msdyn_slakpi", Guid.Parse(def.KpiId));
+                        slaItem["failureafter"] = def.FailureAfter;
+                        slaItem["warnafter"] = def.WarnAfter;
+                        slaItem["applicablewhenxml"] = def.ApplicableWhenXml;
+                        slaItem["successconditionsxml"] = def.SuccessConditionsXml;
+                        slaItem["allowpauseresume"] = def.AllowPauseResume;
+
+                        var newId = client.Create(slaItem);
+                        log?.Invoke($"  SLA Item created. ID: {newId}");
+
+                        if (wasActive)
+                        {
+                            log?.Invoke("  Reactivating parent SLA...");
+                            var activate = new SetStateRequest
+                            {
+                                EntityMoniker = slaRef,
+                                State = new OptionSetValue(1),  // Active
+                                Status = new OptionSetValue(2)  // Active
+                            };
+                            client.Execute(activate);
+                            log?.Invoke("  SLA reactivated.");
+                        }
+
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = newId.ToString() };
                         break;
                     }
 
@@ -2002,6 +2255,65 @@ public static class CommitPipeline
         File.Move(filePath, committedPath, overwrite: true);
     }
 
+    /// <summary>
+    /// Insert local option values for a picklist/multiselectpicklist attribute.
+    /// Skips values that already exist (idempotent for update support).
+    /// </summary>
+    private static void InsertLocalOptionValues(
+        IOrganizationService client,
+        string entityLogicalName,
+        string attributeLogicalName,
+        List<OptionDefinition> options,
+        string solutionUniqueName,
+        Action<string>? log)
+    {
+        // Retrieve existing option values to support idempotent add/update
+        HashSet<int> existingValues;
+        try
+        {
+            var retrieveReq = new RetrieveAttributeRequest
+            {
+                EntityLogicalName = entityLogicalName,
+                LogicalName = attributeLogicalName,
+                RetrieveAsIfPublished = true
+            };
+            var retrieveResp = (RetrieveAttributeResponse)client.Execute(retrieveReq);
+            var optionSet = retrieveResp.AttributeMetadata switch
+            {
+                PicklistAttributeMetadata p => p.OptionSet,
+                MultiSelectPicklistAttributeMetadata m => m.OptionSet,
+                _ => null
+            };
+            existingValues = optionSet?.Options
+                .Select(o => o.Value ?? 0)
+                .ToHashSet() ?? new HashSet<int>();
+        }
+        catch
+        {
+            existingValues = new HashSet<int>();
+        }
+
+        foreach (var opt in options)
+        {
+            if (existingValues.Contains(opt.Value))
+            {
+                log?.Invoke($"    Option {opt.Value} ('{opt.Label}') already exists — skipping.");
+                continue;
+            }
+
+            var request = new InsertOptionValueRequest
+            {
+                EntityLogicalName = entityLogicalName,
+                AttributeLogicalName = attributeLogicalName,
+                Label = new Label(opt.Label, 1030),
+                Value = opt.Value,
+                SolutionUniqueName = solutionUniqueName
+            };
+            var response = (InsertOptionValueResponse)client.Execute(request);
+            log?.Invoke($"    Added option {response.NewOptionValue} = '{opt.Label}'");
+        }
+    }
+
     private static void WriteOutputsFile(string path, Dictionary<string, Dictionary<string, string>> outputs)
     {
         var json = JsonSerializer.Serialize(outputs, new JsonSerializerOptions { WriteIndented = true });
@@ -2023,5 +2335,67 @@ public static class CommitPipeline
 
         if (Directory.GetFileSystemEntries(rootDir).Length == 0)
             Directory.Delete(rootDir);
+    }
+
+    /// <summary>
+    /// Recursively discover and delete child records that block deletion due to
+    /// cascade-restrict relationships. Handles arbitrary depth (e.g. SLA → SLAItem → SLAKPIInstance).
+    /// </summary>
+    private static void CascadeDeleteRestrictChildren(
+        IOrganizationService client,
+        string entityType,
+        Guid recordId,
+        Action<string>? log,
+        HashSet<(string Entity, Guid Id)> visited)
+    {
+        if (!visited.Add((entityType, recordId)))
+            return; // Already processed — avoid infinite loops
+
+        // Retrieve entity metadata to find restrict-delete relationships where this entity is the parent
+        var entityReq = new RetrieveEntityRequest
+        {
+            LogicalName = entityType,
+            EntityFilters = EntityFilters.Relationships
+        };
+        var entityResp = (RetrieveEntityResponse)client.Execute(entityReq);
+
+        var restrictRelationships = entityResp.EntityMetadata.OneToManyRelationships
+            .Where(r => r.CascadeConfiguration?.Delete == CascadeType.Restrict)
+            .ToList();
+
+        if (restrictRelationships.Count == 0)
+            return;
+
+        log?.Invoke($"  Found {restrictRelationships.Count} restrict-delete relationship(s) for {entityType}");
+
+        foreach (var rel in restrictRelationships)
+        {
+            var childQuery = new QueryExpression(rel.ReferencingEntity)
+            {
+                ColumnSet = new ColumnSet(false),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression(rel.ReferencingAttribute, ConditionOperator.Equal, recordId)
+                    }
+                }
+            };
+
+            var children = client.RetrieveMultiple(childQuery).Entities;
+            if (children.Count == 0)
+                continue;
+
+            log?.Invoke($"  Cascade-deleting {children.Count} {rel.ReferencingEntity} record(s) via {rel.SchemaName}");
+
+            foreach (var child in children)
+            {
+                // Recursively handle grandchildren that also have restrict-delete
+                CascadeDeleteRestrictChildren(client, rel.ReferencingEntity, child.Id, log, visited);
+
+                log?.Invoke($"    Deleting {rel.ReferencingEntity}: {child.Id}");
+                client.Delete(rel.ReferencingEntity, child.Id);
+            }
+        }
     }
 }

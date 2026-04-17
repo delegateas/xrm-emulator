@@ -11,6 +11,7 @@ public enum CommitItemType
     AppModuleEntity,
     AppModuleView,
     AppModuleForm,
+    AppModuleBpf,
     BusinessRule,
     Delete,
     Deprecate,
@@ -26,7 +27,11 @@ public enum CommitItemType
     PcfControl,
     OptionSetValue,
     StatusValue,
-    AddSolutionComponent
+    AddSolutionComponent,
+    EnableChangeTracking,
+    CustomApiRegistration,
+    SlaItem,
+    SlaKpi
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

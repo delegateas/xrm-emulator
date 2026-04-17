@@ -186,8 +186,8 @@ public static class PluginWriter
 
         var stepName = $"{stepDef.MessageName} of {stepDef.PrimaryEntity}";
 
-        // Check if step already exists for this type + message + entity
-        var existingId = FindStepByTypeAndMessage(service, pluginTypeId, messageId, filterId);
+        // Check if step already exists for this type + message + entity + stage
+        var existingId = FindStepByTypeAndMessage(service, pluginTypeId, messageId, filterId, stepDef.Stage);
 
         if (existingId.HasValue)
         {
@@ -297,14 +297,15 @@ public static class PluginWriter
                     string.Equals(t.TypeName, typeName, StringComparison.OrdinalIgnoreCase));
 
                 var existingSteps = FindAllStepsByType(service, typeId);
-                foreach (var (stepId, stepMessageId, stepFilterId) in existingSteps)
+                foreach (var (stepId, stepMessageId, stepFilterId, stepStage) in existingSteps)
                 {
                     var stillDefined = typeDef.Steps.Any(s =>
                     {
                         var msgId = ResolveSdkMessageId(service, s.MessageName);
                         var filtId = ResolveSdkMessageFilterId(service, msgId, s.PrimaryEntity);
                         return msgId == stepMessageId &&
-                               (filtId == stepFilterId || (filtId == Guid.Empty && stepFilterId == Guid.Empty));
+                               (filtId == stepFilterId || (filtId == Guid.Empty && stepFilterId == Guid.Empty)) &&
+                               s.Stage == stepStage;
                     });
 
                     if (!stillDefined)
@@ -320,7 +321,7 @@ public static class PluginWriter
             {
                 // Type no longer in JSON — delete all its steps, then the type
                 var existingSteps = FindAllStepsByType(service, typeId);
-                foreach (var (stepId, _, _) in existingSteps)
+                foreach (var (stepId, _, _, _) in existingSteps)
                 {
                     DeleteStepImages(service, stepId);
                     service.Delete("sdkmessageprocessingstep", stepId);
@@ -352,12 +353,12 @@ public static class PluginWriter
             .ToList();
     }
 
-    private static List<(Guid Id, Guid MessageId, Guid FilterId)> FindAllStepsByType(
+    private static List<(Guid Id, Guid MessageId, Guid FilterId, int Stage)> FindAllStepsByType(
         IOrganizationService service, Guid pluginTypeId)
     {
         var query = new QueryExpression("sdkmessageprocessingstep")
         {
-            ColumnSet = new ColumnSet("sdkmessageid", "sdkmessagefilterid"),
+            ColumnSet = new ColumnSet("sdkmessageid", "sdkmessagefilterid", "stage"),
             Criteria = new FilterExpression
             {
                 Conditions =
@@ -367,10 +368,14 @@ public static class PluginWriter
             }
         };
         return service.RetrieveMultiple(query).Entities
+            // Skip stage 30 (MainOperation) steps — these are managed by Custom API
+            // registration and cannot be modified or deleted through the SDK.
+            .Where(e => e.GetAttributeValue<OptionSetValue>("stage")?.Value != 30)
             .Select(e => (
                 e.Id,
                 e.GetAttributeValue<EntityReference>("sdkmessageid")?.Id ?? Guid.Empty,
-                e.GetAttributeValue<EntityReference>("sdkmessagefilterid")?.Id ?? Guid.Empty))
+                e.GetAttributeValue<EntityReference>("sdkmessagefilterid")?.Id ?? Guid.Empty,
+                e.GetAttributeValue<OptionSetValue>("stage")?.Value ?? 0))
             .ToList();
     }
 
@@ -434,8 +439,10 @@ public static class PluginWriter
     }
 
     private static Guid? FindStepByTypeAndMessage(
-        IOrganizationService service, Guid pluginTypeId, Guid messageId, Guid filterId)
+        IOrganizationService service, Guid pluginTypeId, Guid messageId, Guid filterId, int stage)
     {
+        // A plugin type can have multiple steps on the same message+entity at different stages
+        // (e.g., Pre-Op sync + Post-Op sync). Include stage in the dedup key so both steps coexist.
         var query = new QueryExpression("sdkmessageprocessingstep")
         {
             ColumnSet = new ColumnSet(false),
@@ -444,7 +451,8 @@ public static class PluginWriter
                 Conditions =
                 {
                     new ConditionExpression("eventhandler", ConditionOperator.Equal, pluginTypeId),
-                    new ConditionExpression("sdkmessageid", ConditionOperator.Equal, messageId)
+                    new ConditionExpression("sdkmessageid", ConditionOperator.Equal, messageId),
+                    new ConditionExpression("stage", ConditionOperator.Equal, stage)
                 }
             }
         };

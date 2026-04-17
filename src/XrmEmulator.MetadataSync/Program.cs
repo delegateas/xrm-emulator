@@ -104,6 +104,11 @@ try
     {
         HandleEntityAttributeAddCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("enable-changetracking", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleEntityEnableChangeTrackingCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase))
     {
         await HandleEntityCommand(positionalArgs, configuration, noCache);
@@ -144,6 +149,10 @@ try
     {
         HandlePluginCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("customapi", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleCustomApiCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("relationship", StringComparison.OrdinalIgnoreCase))
     {
         HandleRelationshipCommand(positionalArgs, args);
@@ -169,9 +178,17 @@ try
     {
         HandleSolutionAddComponentCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("sla", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleSlaCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("query", StringComparison.OrdinalIgnoreCase))
     {
         await HandleQueryCommand(positionalArgs, args, configuration, noCache);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("delete", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleDeleteCommand(positionalArgs, args);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pending", StringComparison.OrdinalIgnoreCase))
     {
@@ -425,6 +442,31 @@ static string FindEntityFolderName(string solutionExportDir, string entityLogica
     return ToPascalCase(entityLogicalName);
 }
 
+static string? FindEntityXmlInSnapshot(string solutionExportDir, string entityFolderName)
+{
+    if (!Directory.Exists(solutionExportDir)) return null;
+
+    foreach (var solDir in Directory.GetDirectories(solutionExportDir))
+    {
+        var dirName = Path.GetFileName(solDir);
+        if (dirName.StartsWith('.') || dirName.StartsWith('_')) continue;
+
+        var entityXml = Path.Combine(solDir, "Entities", entityFolderName, "Entity.xml");
+        if (File.Exists(entityXml))
+            return entityXml;
+    }
+    return null;
+}
+
+static bool IsVirtualEntity(string entityXmlPath)
+{
+    var doc = System.Xml.Linq.XDocument.Load(entityXmlPath);
+    var dataProviderId = doc.Descendants("DataProviderId").FirstOrDefault()?.Value;
+    return !string.IsNullOrEmpty(dataProviderId)
+        && Guid.TryParse(dataProviderId, out var id)
+        && id != Guid.Empty;
+}
+
 static string ToPascalCase(string logicalName)
 {
     // Handle prefixed names like "cr_partnerrole" → "cr_PartnerRole"
@@ -569,6 +611,65 @@ static void HandleViewsDeleteCommand(string[] positionalArgs)
 }
 
 // ──────────────────────────────────────────────────────────────
+// delete <entity> <guid> [--cascade] — generic record deletion
+// ──────────────────────────────────────────────────────────────
+static void HandleDeleteCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync delete[/] — stage a record deletion");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Usage:[/]");
+        AnsiConsole.MarkupLine("  delete <entity-logical-name> <guid> [[--cascade]]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Options:[/]");
+        AnsiConsole.MarkupLine("  --cascade    Auto-delete child records that block deletion via restrict-delete relationships");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Examples:[/]");
+        AnsiConsole.MarkupLine("  delete slaitem 4e1e6fe7-4b39-f111-88b4-7ced8d2f096e --cascade");
+        AnsiConsole.MarkupLine("  delete sla 00000000-0000-0000-0000-000000000000 --cascade");
+        AnsiConsole.MarkupLine("  delete workflow a1b2c3d4-0000-0000-0000-000000000000");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+    }
+
+    var entityType = positionalArgs[1].ToLowerInvariant();
+    var idArg = positionalArgs[2].Trim('{', '}');
+    if (!Guid.TryParse(idArg, out var recordId))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid GUID:[/] {positionalArgs[2]}");
+        Environment.Exit(1);
+    }
+
+    var cascade = HasFlag(allArgs, "--cascade");
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Deletes");
+    Directory.CreateDirectory(pendingDir);
+
+    var deleteDef = new DeleteDefinition
+    {
+        EntityType = entityType,
+        ComponentId = recordId,
+        DisplayName = $"{entityType} {recordId}",
+        Cascade = cascade
+    };
+
+    var fileName = $"{entityType}_{recordId.ToString().ToLowerInvariant()}.delete.json";
+    var filePath = Path.Combine(pendingDir, fileName);
+    File.WriteAllText(filePath, JsonSerializer.Serialize(deleteDef, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    var cascadeLabel = cascade ? " [yellow](cascade)[/]" : "";
+    AnsiConsole.MarkupLine($"[green]Staged delete:[/] {entityType} ({recordId}){cascadeLabel}");
+    AnsiConsole.MarkupLine($"[grey]File: {filePath}[/]");
+    AnsiConsole.MarkupLine("[grey]Run 'commit' to execute the delete against CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
 // forms delete <guid> — delete a form from CRM
 // ──────────────────────────────────────────────────────────────
 static void HandleFormsDeleteCommand(string[] positionalArgs)
@@ -635,7 +736,7 @@ static void HandleAppModuleCommand(string[] positionalArgs, string[] allArgs)
 {
     if (positionalArgs.Length < 2)
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule <views|forms|entity|list> ...");
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule <views|forms|entity|bpf|list> ...");
         Environment.Exit(1);
     }
 
@@ -650,6 +751,10 @@ static void HandleAppModuleCommand(string[] positionalArgs, string[] allArgs)
     else if (positionalArgs[1].Equals("entity", StringComparison.OrdinalIgnoreCase))
     {
         HandleAppModuleEntityCommand(positionalArgs, allArgs);
+    }
+    else if (positionalArgs[1].Equals("bpf", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleAppModuleBpfCommand(positionalArgs, allArgs);
     }
     else if (positionalArgs[1].Equals("list", StringComparison.OrdinalIgnoreCase))
     {
@@ -1819,6 +1924,10 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]ribbonworkbench hide[/] <entity> <button-id>            Hide a ribbon button via HideCustomAction");
     AnsiConsole.MarkupLine("  [bold]deprecate[/] <entity> <attribute>                       Deprecate a field (prefix display name with ZZ)");
     AnsiConsole.MarkupLine("  [bold]optionset add-value[/] <name> <label> [--value <int>]  Add a value to a global option set");
+    AnsiConsole.MarkupLine("  [bold]delete[/] <entity> <guid> [[--cascade]]                Delete a record (--cascade removes restrict-delete children first)");
+    AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
+    AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
+    AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
     AnsiConsole.MarkupLine("  [bold]commit[/]                                             Push pending changes to CRM");
     AnsiConsole.MarkupLine("  [bold]git-init[/]                                           Initialize git tracking in SolutionExport/");
     AnsiConsole.WriteLine();
@@ -1926,6 +2035,59 @@ static void HandleAppModuleEntityCommand(string[] positionalArgs, string[] allAr
         }
     }
 
+    AnsiConsole.MarkupLine($"[grey]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// appmodule bpf add <bpf-name> [--app <appmodule-name>] [--entity <primary-entity>]
+// ──────────────────────────────────────────────────────────────
+static void HandleAppModuleBpfCommand(string[] positionalArgs, string[] allArgs)
+{
+    var action = positionalArgs.Length >= 3 ? positionalArgs[2].ToLowerInvariant() : null;
+    if (positionalArgs.Length < 4 || (action != "add" && action != "remove"))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule bpf <add|remove> <bpf-name> [[--app <appmodule-name>]] [[--entity <primary-entity>]]");
+        AnsiConsole.MarkupLine("[grey]Example: appmodule bpf add \"Dubletproces KF\" --app kf_KFSales[/]");
+        AnsiConsole.MarkupLine("[grey]Example: appmodule bpf remove \"Salgsproces KF\" --app kf_KFSales[/]");
+        Environment.Exit(1);
+    }
+
+    var bpfName = positionalArgs[3];
+    var appModuleName = ParseNamedArg(allArgs, "--app");
+    var primaryEntity = ParseNamedArg(allArgs, "--entity");
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    var (selectedAppModuleUniqueName, _) = ResolveAppModule(solutionExportDir, appModuleName);
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "AppModuleBpfs");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new AppModuleBpfDefinition
+    {
+        AppModuleUniqueName = selectedAppModuleUniqueName,
+        BpfName = bpfName,
+        PrimaryEntity = primaryEntity,
+        Action = action
+    };
+
+    var safeName = bpfName.Replace(" ", "_").Replace("/", "_").Replace("\\", "_");
+    var jsonPath = Path.Combine(pendingDir, $"{selectedAppModuleUniqueName}_{safeName}.{action}.json");
+    var json = JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    });
+    File.WriteAllText(jsonPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged AppModule BPF ({action}):[/]");
+    AnsiConsole.MarkupLine($"  AppModule: {selectedAppModuleUniqueName}");
+    AnsiConsole.MarkupLine($"  BPF:       {bpfName}");
+    if (!string.IsNullOrEmpty(primaryEntity))
+        AnsiConsole.MarkupLine($"  Entity:    {primaryEntity}");
+    AnsiConsole.MarkupLine($"  File:      {jsonPath}");
     AnsiConsole.MarkupLine($"[grey]Run [blue]commit[/] to push to CRM.[/]");
 }
 
@@ -2452,6 +2614,70 @@ static void HandleEntityNewCommand(string[] positionalArgs, string[] allArgs)
 }
 
 // ──────────────────────────────────────────────────────────────
+// entity enable-changetracking <entity> [<entity2> ...]
+// ──────────────────────────────────────────────────────────────
+static void HandleEntityEnableChangeTrackingCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync entity enable-changetracking[/] — enable change tracking on one or more entities");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  entity enable-changetracking <entity> [<entity2> ...]");
+        AnsiConsole.MarkupLine("    [grey]Example: entity enable-changetracking kf_brand kf_partnerrole[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending");
+    Directory.CreateDirectory(pendingDir);
+
+    var entities = positionalArgs.Skip(2).ToList();
+    var jsonOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    var staged = 0;
+    foreach (var entity in entities)
+    {
+        var logicalName = entity.ToLowerInvariant();
+
+        // Check if entity is virtual (has DataProviderId in snapshot) — virtual entities do not support change tracking
+        var entityFolderName = FindEntityFolderName(solutionExportDir, logicalName);
+        var entityXmlPath = FindEntityXmlInSnapshot(solutionExportDir, entityFolderName);
+        if (entityXmlPath != null && IsVirtualEntity(entityXmlPath))
+        {
+            AnsiConsole.MarkupLine($"[red]Skipped:[/] [bold]{logicalName}[/] is a virtual entity — change tracking is not supported.");
+            continue;
+        }
+
+        var definition = new EnableChangeTrackingDefinition
+        {
+            EntityLogicalName = logicalName,
+            SolutionUniqueName = metadata.Solution.UniqueName,
+        };
+
+        var destPath = Path.Combine(pendingDir, $"{logicalName}.enablechangetracking.json");
+        File.WriteAllText(destPath, JsonSerializer.Serialize(definition, jsonOptions));
+
+        AnsiConsole.MarkupLine($"[green]Staged:[/] Enable change tracking on [bold]{logicalName}[/]");
+        AnsiConsole.MarkupLine($"  File: {destPath}");
+        staged++;
+    }
+
+    AnsiConsole.WriteLine();
+    if (staged > 0)
+        AnsiConsole.MarkupLine($"[yellow]{staged} entity/entities staged. Run [blue]commit[/] to push to CRM.[/]");
+    else
+        AnsiConsole.MarkupLine("[yellow]No entities staged — all were virtual or not found.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
 // entity attribute add <entity> <name> --type <type> [--target <entity>] [--display-name <name>] [--relationship <schema>]
 // ──────────────────────────────────────────────────────────────
 static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] allArgs)
@@ -2564,6 +2790,322 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
     AnsiConsole.MarkupLine($"  File:        {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// sla — SLA management commands
+// ──────────────────────────────────────────────────────────────
+static async Task HandleSlaCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("clone-item", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleSlaCloneItemCommand(positionalArgs, allArgs, configuration, noCache);
+    }
+    else if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("add-to-solution", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleSlaAddToSolutionCommand(positionalArgs, allArgs);
+    }
+    else if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("create-kpi", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleSlaCreateKpiCommand(positionalArgs, allArgs);
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  sla clone-item <source-sla-item-id> --name <name> --failure <min> --warning <min> [--condition-value <value>]");
+        AnsiConsole.MarkupLine("  sla create-kpi --name <name> --entity <entity> --kpi-field <field> [--applicable-from <field>]");
+        AnsiConsole.MarkupLine("  sla add-to-solution <sla-id>");
+        Environment.Exit(1);
+    }
+}
+
+static async Task HandleSlaCloneItemCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync sla clone-item <source-sla-item-id> --name <name> --failure <min> --warning <min> [options]");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Clones an existing SLA item. Optionally overrides attribute/value in applicable-when, the KPI, and success conditions.[/]");
+        AnsiConsole.MarkupLine("[yellow]Options:[/]");
+        AnsiConsole.MarkupLine("  [grey]--condition-value <value>   Replace option set value (1000000XX) in applicable-when XML[/]");
+        AnsiConsole.MarkupLine("  [grey]--condition-attr <name>     Replace condition attribute name in applicable-when XML[/]");
+        AnsiConsole.MarkupLine("  [grey]--kpi <guid>                Override the SLA KPI ID[/]");
+        AnsiConsole.MarkupLine("  [grey]--success-statuscode <v>    Rebuild success as 'statuscode eq <value>'[/]");
+        AnsiConsole.MarkupLine("[grey]Example: sla clone-item <id> --name \"TID-TIL-MOEDE-4Timer\" --failure 240 --warning 180 --condition-attr kf_slatimetomeetingbooked --kpi <new-kpi-id> --success-statuscode 100000003[/]");
+        Environment.Exit(1);
+    }
+
+    var sourceItemIdStr = positionalArgs[2];
+    if (!Guid.TryParse(sourceItemIdStr, out var sourceItemId))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid GUID:[/] {sourceItemIdStr}");
+        Environment.Exit(1);
+    }
+
+    var name = ParseNamedArg(allArgs, "--name");
+    var failureStr = ParseNamedArg(allArgs, "--failure");
+    var warningStr = ParseNamedArg(allArgs, "--warning");
+    var conditionValue = ParseNamedArg(allArgs, "--condition-value");
+    var conditionAttr = ParseNamedArg(allArgs, "--condition-attr");
+    var kpiOverride = ParseNamedArg(allArgs, "--kpi");
+    var successStatuscode = ParseNamedArg(allArgs, "--success-statuscode");
+
+    if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(failureStr) || string.IsNullOrEmpty(warningStr))
+    {
+        AnsiConsole.MarkupLine("[red]--name, --failure, and --warning are required.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (!int.TryParse(failureStr, out var failureAfter) | !int.TryParse(warningStr, out var warnAfter))
+    {
+        AnsiConsole.MarkupLine("[red]--failure and --warning must be integers (minutes).[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Connect to CRM to retrieve the source SLA item
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    // Retrieve the source SLA item
+    AnsiConsole.MarkupLine($"[grey]Retrieving source SLA item {sourceItemId}...[/]");
+    var sourceItem = client.Retrieve("slaitem", sourceItemId, new Microsoft.Xrm.Sdk.Query.ColumnSet(true));
+
+    var slaId = sourceItem.GetAttributeValue<EntityReference>("slaid")?.Id.ToString()
+        ?? throw new InvalidOperationException("Source SLA item has no parent SLA (slaid).");
+    var kpiRef = sourceItem.GetAttributeValue<EntityReference>("msdyn_slakpiid");
+    var kpiId = kpiRef?.Id.ToString()
+        ?? throw new InvalidOperationException("Source SLA item has no KPI (msdyn_slakpiid).");
+    var sourceApplicableWhenXml = sourceItem.GetAttributeValue<string>("applicablewhenxml")
+        ?? throw new InvalidOperationException("Source SLA item has no applicablewhenxml.");
+    var sourceSuccessConditionsXml = sourceItem.GetAttributeValue<string>("successconditionsxml")
+        ?? throw new InvalidOperationException("Source SLA item has no successconditionsxml.");
+    var sourceAllowPause = sourceItem.GetAttributeValue<bool?>("allowpauseresume") ?? true;
+
+    AnsiConsole.MarkupLine($"[grey]  Source SLA:   {slaId}[/]");
+    AnsiConsole.MarkupLine($"[grey]  Source KPI:   {kpiId}[/]");
+
+    // Optionally replace condition attribute name in applicable-when XML
+    var applicableWhenXml = sourceApplicableWhenXml;
+    if (!string.IsNullOrEmpty(conditionAttr))
+    {
+        var attrMatch = System.Text.RegularExpressions.Regex.Match(applicableWhenXml, @"<condition attribute=""([^""]+)""");
+        if (attrMatch.Success)
+        {
+            var oldAttr = attrMatch.Groups[1].Value;
+            applicableWhenXml = applicableWhenXml.Replace($@"attribute=""{oldAttr}""", $@"attribute=""{conditionAttr}""");
+            AnsiConsole.MarkupLine($"[grey]  Replaced condition attribute: {oldAttr} → {conditionAttr}[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[yellow]  Warning: No condition attribute pattern found in applicable-when XML. --condition-attr ignored.[/]");
+        }
+    }
+
+    // Optionally replace condition value in applicable-when XML
+    if (!string.IsNullOrEmpty(conditionValue))
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(applicableWhenXml, @"value=""(1000000\d{2})""");
+        if (match.Success)
+        {
+            var oldValue = match.Groups[1].Value;
+            applicableWhenXml = applicableWhenXml.Replace(oldValue, conditionValue);
+            AnsiConsole.MarkupLine($"[grey]  Replaced condition value: {oldValue} → {conditionValue}[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[yellow]  Warning: No option set value pattern (1000000XX) found in applicable-when XML. --condition-value ignored.[/]");
+        }
+    }
+
+    // Optionally override the KPI ID
+    if (!string.IsNullOrEmpty(kpiOverride))
+    {
+        if (!Guid.TryParse(kpiOverride, out _))
+        {
+            AnsiConsole.MarkupLine($"[red]--kpi must be a GUID, got:[/] {kpiOverride}");
+            Environment.Exit(1);
+        }
+        AnsiConsole.MarkupLine($"[grey]  Overriding KPI: {kpiId} → {kpiOverride}[/]");
+        kpiId = kpiOverride;
+    }
+
+    // Optionally rebuild success conditions as "statuscode eq <value>"
+    var successConditionsXml = sourceSuccessConditionsXml;
+    if (!string.IsNullOrEmpty(successStatuscode))
+    {
+        successConditionsXml = $@"<fetch version=""1.0"" output-format=""xml-platform"" mapping=""logical"">
+    <entity name=""lead"">
+        <filter type=""and"">
+            <condition attribute=""statuscode"" operator=""eq"" value=""{successStatuscode}""/>
+        </filter>
+    </entity>
+</fetch>";
+        AnsiConsole.MarkupLine($"[grey]  Rebuilt success conditions: statuscode eq {successStatuscode}[/]");
+    }
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value;
+
+    var definition = new SlaItemDefinition
+    {
+        SlaId = slaId,
+        Name = name,
+        KpiId = kpiId,
+        FailureAfter = failureAfter,
+        WarnAfter = warnAfter,
+        ApplicableWhenXml = applicableWhenXml,
+        SuccessConditionsXml = successConditionsXml,
+        AllowPauseResume = sourceAllowPause,
+        SolutionUniqueName = solutionUniqueName
+    };
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SlaItems");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = name.Replace(" ", "-").Replace("/", "-").Replace("\\", "-");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.slaitem.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged SLA item clone:[/]");
+    AnsiConsole.MarkupLine($"  Name:     {name}");
+    AnsiConsole.MarkupLine($"  Failure:  {failureAfter} min");
+    AnsiConsole.MarkupLine($"  Warning:  {warnAfter} min");
+    AnsiConsole.MarkupLine($"  SLA:      {slaId}");
+    AnsiConsole.MarkupLine($"  KPI:      {kpiId}");
+    AnsiConsole.MarkupLine($"  File:     {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to create SLA item in CRM.[/]");
+}
+
+static void HandleSlaAddToSolutionCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync sla add-to-solution <sla-id>");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Stages adding an SLA to the solution. The SLA ID is the GUID of the SLA record.[/]");
+        AnsiConsole.MarkupLine("[grey]Example: sla add-to-solution 12345678-1234-1234-1234-123456789abc[/]");
+        Environment.Exit(1);
+    }
+
+    var slaIdStr = positionalArgs[2];
+    if (!Guid.TryParse(slaIdStr, out _))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid GUID:[/] {slaIdStr}");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    var definition = new SolutionComponentDefinition
+    {
+        EntityLogicalName = "sla",
+        AttributeLogicalName = slaIdStr.ToLowerInvariant(),
+        ComponentType = "sla",
+        DisplayName = $"SLA {slaIdStr}",
+        SolutionUniqueName = solutionUniqueName
+    };
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SolutionComponents");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"sla_{slaIdStr}.solutioncomponent.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged SLA solution component:[/]");
+    AnsiConsole.MarkupLine($"  SLA ID:     {slaIdStr}");
+    AnsiConsole.MarkupLine($"  Solution:   {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:       {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to add SLA to solution.[/]");
+}
+
+static void HandleSlaCreateKpiCommand(string[] positionalArgs, string[] allArgs)
+{
+    var name = ParseNamedArg(allArgs, "--name");
+    var entityName = ParseNamedArg(allArgs, "--entity");
+    var kpiField = ParseNamedArg(allArgs, "--kpi-field");
+    var applicableFrom = ParseNamedArg(allArgs, "--applicable-from") ?? "createdon";
+
+    if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(kpiField))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync sla create-kpi --name <name> --entity <entity> --kpi-field <field> [--applicable-from <field>]");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Creates an SLA KPI definition (msdyn_slakpi) record.[/]");
+        AnsiConsole.MarkupLine("[grey]The --kpi-field is the lookup field on the entity that points to slakpiinstance.[/]");
+        AnsiConsole.MarkupLine("[grey]Example: sla create-kpi --name \"LEAD-Møde Booket SLA\" --entity lead --kpi-field kf_sla_meetingbooked[/]");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    var definition = new SlaKpiDefinition
+    {
+        Name = name,
+        EntityName = entityName.ToLowerInvariant(),
+        KpiField = kpiField.ToLowerInvariant(),
+        ApplicableFromField = applicableFrom.ToLowerInvariant(),
+        SolutionUniqueName = solutionUniqueName
+    };
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SlaKpis");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = name.Replace(" ", "-").Replace("/", "-").Replace("\\", "-");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.slakpi.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged SLA KPI:[/]");
+    AnsiConsole.MarkupLine($"  Name:           {name}");
+    AnsiConsole.MarkupLine($"  Entity:         {entityName}");
+    AnsiConsole.MarkupLine($"  KPI Field:      {kpiField}");
+    AnsiConsole.MarkupLine($"  Applicable From: {applicableFrom}");
+    AnsiConsole.MarkupLine($"  Solution:       {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:           {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to create SLA KPI in CRM.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -4502,6 +5044,36 @@ static void HandlePendingCommand()
         items.Add(("Add to Solution", $"{parsed.EntityLogicalName}.{parsed.AttributeLogicalName} ({parsed.ComponentType})", Path.GetRelativePath(pendingDir, f)));
     }
 
+    var pendingSlaItemFiles = Directory.GetFiles(pendingDir, "*.slaitem.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSlaItemFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SlaItemDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("SLA Item", $"{parsed.Name} (fail: {parsed.FailureAfter}min, warn: {parsed.WarnAfter}min)", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingSlaKpiFiles = Directory.GetFiles(pendingDir, "*.slakpi.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSlaKpiFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SlaKpiDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("SLA KPI", $"{parsed.Name} (entity: {parsed.EntityName}, field: {parsed.KpiField})", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    var pendingChangeTrackingFiles = Directory.GetFiles(pendingDir, "*.enablechangetracking.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingChangeTrackingFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<EnableChangeTrackingDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Enable Change Tracking", parsed.EntityLogicalName, Path.GetRelativePath(pendingDir, f)));
+    }
+
     if (items.Count == 0)
     {
         AnsiConsole.MarkupLine("[yellow]No pending changes.[/]");
@@ -4586,7 +5158,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         .Title("Select changes to push to CRM:")
         .PageSize(20)
         .InstructionsText("[grey](Press [blue]<space>[/] to toggle, [green]<enter>[/] to accept)[/]")
-        .UseConverter(c => c.DisplayName);
+        .UseConverter(c => Markup.Escape(c.DisplayName));
 
     // Add items — for security roles, show privilege details in the converter
     foreach (var item in commitItems)
@@ -5776,6 +6348,308 @@ static string? TryExtractHttpResponseContent(Exception? ex)
     var contentProp = response.GetType().GetProperty("Content");
     var content = contentProp?.GetValue(response) as string;
     return string.IsNullOrWhiteSpace(content) ? null : content;
+}
+
+// ──────────────────────────────────────────────────────────────
+// customapi new <unique-name> — scaffold Custom API pending file
+// customapi test <unique-name> --param Key=Value — invoke a Custom API
+// ──────────────────────────────────────────────────────────────
+static async Task HandleCustomApiCommand(string[] positionalArgs, string[] allArgs,
+    IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 2)
+    {
+        PrintCustomApiUsage();
+        Environment.Exit(1);
+    }
+
+    var subCommand = positionalArgs[1].ToLowerInvariant();
+
+    switch (subCommand)
+    {
+        case "new":
+            HandleCustomApiNewCommand(positionalArgs);
+            break;
+        case "test":
+            await HandleCustomApiTestCommand(positionalArgs, allArgs, configuration, noCache);
+            break;
+        default:
+            PrintCustomApiUsage();
+            Environment.Exit(1);
+            break;
+    }
+}
+
+static void PrintCustomApiUsage()
+{
+    AnsiConsole.MarkupLine("[red]Usage:[/]");
+    AnsiConsole.MarkupLine("  customapi new <unique-name>                          Create a new Custom API pending file");
+    AnsiConsole.MarkupLine("  customapi test <unique-name> --param Key=Value ...   Invoke a Custom API and show the result");
+    AnsiConsole.MarkupLine("");
+    AnsiConsole.MarkupLine("[grey]Examples:[/]");
+    AnsiConsole.MarkupLine("  customapi new kf_CheckCustomerAccess");
+    AnsiConsole.MarkupLine("  customapi test kf_CheckCustomerAccess --param EntityLogicalName=contact --param RecordId=00000000-0000-0000-0000-000000000001");
+}
+
+static void HandleCustomApiNewCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] customapi new <unique-name>");
+        Environment.Exit(1);
+    }
+
+    var uniqueName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    var definition = new XrmEmulator.MetadataSync.Models.CustomApiDefinition
+    {
+        UniqueName = uniqueName,
+        Name = uniqueName,
+        DisplayName = uniqueName,
+        Description = "",
+        IsFunction = false,
+        BindingType = 0,
+        AllowedCustomProcessingStepType = 0,
+        IsPrivate = false,
+        PluginTypeName = "",
+        SolutionUniqueName = solutionUniqueName,
+        RequestParameters = [],
+        ResponseProperties = []
+    };
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "CustomApis");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{uniqueName}.customapi.json");
+    File.WriteAllText(destPath, System.Text.Json.JsonSerializer.Serialize(definition,
+        new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+        }));
+
+    AnsiConsole.MarkupLine($"[green]Custom API pending file created:[/]");
+    AnsiConsole.MarkupLine($"  Unique Name: {uniqueName}");
+    AnsiConsole.MarkupLine($"  Solution:    {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:        {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the file to set pluginTypeName, request parameters, and response properties, then run [blue]commit[/] to push to CRM.[/]");
+}
+
+static async Task HandleCustomApiTestCommand(string[] positionalArgs, string[] allArgs,
+    IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] customapi test <unique-name> --param Key=Value ...");
+        Environment.Exit(1);
+    }
+
+    var uniqueName = positionalArgs[2];
+
+    // Parse --param Key=Value pairs
+    var parameters = new Dictionary<string, string>();
+    for (int i = 0; i < allArgs.Length; i++)
+    {
+        if (allArgs[i].Equals("--param", StringComparison.OrdinalIgnoreCase) && i + 1 < allArgs.Length)
+        {
+            var kv = allArgs[i + 1];
+            var eqIdx = kv.IndexOf('=');
+            if (eqIdx > 0)
+            {
+                parameters[kv.Substring(0, eqIdx)] = kv.Substring(eqIdx + 1);
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[red]Invalid parameter format:[/] {kv}  (expected Key=Value)");
+                Environment.Exit(1);
+            }
+            i++; // skip value
+        }
+    }
+
+    // Parse --impersonate
+    var impersonateArg = ParseNamedArg(allArgs, "--impersonate");
+
+    // Connect
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    // Impersonation
+    if (!string.IsNullOrEmpty(impersonateArg))
+    {
+        Guid callerId;
+        if (Guid.TryParse(impersonateArg, out callerId))
+        {
+            // Direct GUID
+        }
+        else
+        {
+            // Resolve by name
+            var userQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("systemuser")
+            {
+                ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("fullname"),
+                TopCount = 1,
+                Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+                {
+                    Conditions =
+                    {
+                        new Microsoft.Xrm.Sdk.Query.ConditionExpression("fullname",
+                            Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, impersonateArg)
+                    }
+                }
+            };
+            var user = client.RetrieveMultiple(userQuery).Entities.FirstOrDefault()
+                ?? throw new InvalidOperationException($"User not found: {impersonateArg}");
+            callerId = user.Id;
+        }
+
+        // Set CallerId for impersonation via reflection (ServiceClient.CallerId)
+        var callerProp = client.GetType().GetProperty("CallerId");
+        if (callerProp != null)
+        {
+            callerProp.SetValue(client, callerId);
+            AnsiConsole.MarkupLine($"[grey]Impersonating user: {callerId}[/]");
+        }
+    }
+
+    // Try to load Custom API definition for type-correct parameter conversion
+    var paramTypeLookup = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    var metadataPathForApi = FindConnectionMetadata();
+    var baseDirForApi = GetBaseDir(metadataPathForApi);
+    var solutionExportDirForApi = Path.Combine(baseDirForApi, "SolutionExport");
+    foreach (var searchDir in new[] { "_pending", "_committed" })
+    {
+        var apiFile = Path.Combine(solutionExportDirForApi, searchDir, "CustomApis", $"{uniqueName}.customapi.json");
+        if (File.Exists(apiFile))
+        {
+            var apiDef = XrmEmulator.MetadataSync.Readers.CustomApiFileReader.Parse(apiFile);
+            foreach (var p in apiDef.RequestParameters)
+                paramTypeLookup[p.UniqueName] = p.Type;
+            AnsiConsole.MarkupLine($"[grey]Loaded parameter types from {searchDir} definition.[/]");
+            break;
+        }
+    }
+
+    // Build the request
+    var request = new Microsoft.Xrm.Sdk.OrganizationRequest(uniqueName);
+    foreach (var (key, value) in parameters)
+    {
+        if (paramTypeLookup.TryGetValue(key, out var typeCode))
+        {
+            // Use the definition's type code for correct conversion
+            // 0=Boolean, 1=DateTime, 2=Decimal, 3=Entity, 5=EntityReference,
+            // 6=Float, 7=Integer, 8=Money, 9=Picklist, 10=String, 12=Guid
+            request[key] = typeCode switch
+            {
+                0 => (object)bool.Parse(value),
+                1 => DateTime.Parse(value),
+                2 => decimal.Parse(value),
+                6 => float.Parse(value),
+                7 => int.Parse(value),
+                12 => Guid.Parse(value),
+                _ => value // String (10), StringArray (11), and others stay as string
+            };
+        }
+        else
+        {
+            // Fallback: auto-parse
+            if (bool.TryParse(value, out var boolVal))
+                request[key] = boolVal;
+            else if (int.TryParse(value, out var intVal))
+                request[key] = intVal;
+            else
+                request[key] = value;
+        }
+    }
+
+    // Show what we're sending
+    AnsiConsole.WriteLine();
+    AnsiConsole.Write(new Rule($"[bold blue]Calling: {uniqueName}[/]").LeftJustified());
+
+    if (parameters.Count > 0)
+    {
+        var inputTable = new Table().Border(TableBorder.Simple)
+            .AddColumn("Parameter")
+            .AddColumn("Value");
+        foreach (var (key, value) in parameters)
+            inputTable.AddRow(Markup.Escape(key), Markup.Escape(value));
+        AnsiConsole.Write(inputTable);
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[grey](no input parameters)[/]");
+    }
+    AnsiConsole.WriteLine();
+
+    // Execute
+    try
+    {
+        var response = client.Execute(request);
+
+        AnsiConsole.Write(new Rule("[bold green]Response[/]").LeftJustified());
+
+        if (response.Results.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[grey](no output parameters)[/]");
+        }
+        else
+        {
+            var outputTable = new Table().Border(TableBorder.Rounded)
+                .AddColumn("Property")
+                .AddColumn("Type")
+                .AddColumn("Value");
+
+            foreach (var (key, val) in response.Results)
+            {
+                var typeName = val?.GetType().Name ?? "null";
+                var displayValue = val switch
+                {
+                    EntityReference er => $"{er.LogicalName} ({er.Id})",
+                    OptionSetValue osv => osv.Value.ToString(),
+                    Money m => m.Value.ToString("F2"),
+                    Entity e => $"{e.LogicalName} ({e.Id}) [{e.Attributes.Count} attr(s)]",
+                    EntityCollection ec => $"{ec.EntityName} [{ec.Entities.Count} record(s)]",
+                    null => "[grey]null[/]",
+                    _ => val.ToString() ?? ""
+                };
+                outputTable.AddRow(Markup.Escape(key), Markup.Escape(typeName), displayValue ?? "");
+            }
+
+            AnsiConsole.Write(outputTable);
+        }
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[green]Custom API executed successfully.[/]");
+    }
+    catch (System.ServiceModel.FaultException<Microsoft.Xrm.Sdk.OrganizationServiceFault> ex)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.Write(new Rule("[bold red]Error[/]").LeftJustified());
+        AnsiConsole.MarkupLine($"[red]Fault:[/] {Markup.Escape(ex.Detail.Message)}");
+        if (!string.IsNullOrEmpty(ex.Detail.TraceText))
+        {
+            AnsiConsole.MarkupLine("[grey]Trace:[/]");
+            AnsiConsole.MarkupLine($"[grey]{Markup.Escape(ex.Detail.TraceText)}[/]");
+        }
+        Environment.Exit(1);
+    }
 }
 
 // Needed for user secrets configuration builder

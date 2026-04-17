@@ -1,6 +1,7 @@
 using System.ServiceModel;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Query;
 using XrmEmulator.MetadataSync.Models;
 
@@ -12,7 +13,7 @@ public static class BusinessRuleWriter
     /// Checks if a business rule with the same name already exists for the entity.
     /// Returns the existing ID if found, null otherwise.
     /// </summary>
-    public static Guid? FindExistingByName(IOrganizationService service, string name, string primaryEntity)
+    public static Guid? FindExistingByName(IOrganizationService service, string name, string primaryEntity, int category = 2)
     {
         var query = new QueryExpression("workflow")
         {
@@ -23,7 +24,7 @@ public static class BusinessRuleWriter
                 {
                     new ConditionExpression("name", ConditionOperator.Equal, name),
                     new ConditionExpression("primaryentity", ConditionOperator.Equal, primaryEntity),
-                    new ConditionExpression("category", ConditionOperator.Equal, 2), // Business Rule
+                    new ConditionExpression("category", ConditionOperator.Equal, category),
                 }
             },
             TopCount = 1
@@ -38,8 +39,8 @@ public static class BusinessRuleWriter
         entity["name"] = rule.Name;
         entity["primaryentity"] = rule.PrimaryEntity;
         entity["xaml"] = rule.Xaml;
-        entity["type"] = new OptionSetValue(1);       // 1 = Definition
-        entity["category"] = new OptionSetValue(2);    // 2 = Business Rule
+        entity["type"] = new OptionSetValue(1);                     // 1 = Definition
+        entity["category"] = new OptionSetValue(rule.Category);     // 2 = Business Rule, 4 = BPF
         entity["scope"] = new OptionSetValue(rule.Scope);
 
         if (rule.Description != null)
@@ -48,34 +49,75 @@ public static class BusinessRuleWriter
         Guid id;
         try
         {
-            id = service.Create(entity);
+            // Create in solution context so the workflow gets the correct publisher prefix.
+            // This is critical for BPFs — the backing entity name derives from the publisher prefix.
+            var createRequest = new CreateRequest { Target = entity };
+            if (!string.IsNullOrEmpty(solutionUniqueName))
+                createRequest.Parameters["SolutionUniqueName"] = solutionUniqueName;
+
+            var createResponse = (CreateResponse)service.Execute(createRequest);
+            id = createResponse.id;
         }
         catch (FaultException<OrganizationServiceFault> ex)
         {
             throw new InvalidOperationException(
-                $"Failed to create business rule '{rule.Name}' for entity '{rule.PrimaryEntity}': {ex.Detail.Message}", ex);
+                $"Failed to create workflow '{rule.Name}' (category {rule.Category}) for entity '{rule.PrimaryEntity}': {ex.Detail.Message}", ex);
         }
 
-        // Add to solution separately
-        if (!string.IsNullOrEmpty(solutionUniqueName))
-        {
-            var addRequest = new AddSolutionComponentRequest
-            {
-                ComponentId = id,
-                ComponentType = 29, // Workflow
-                SolutionUniqueName = solutionUniqueName
-            };
-            service.Execute(addRequest);
-        }
-
-        // Create processtrigger to scope to a specific form
-        if (rule.ProcessTriggerFormId.HasValue)
+        // Create processtrigger to scope to a specific form (business rules only)
+        if (rule.ProcessTriggerFormId.HasValue && rule.Category == 2)
         {
             var trigger = new Entity("processtrigger");
             trigger["processid"] = new EntityReference("workflow", id);
             trigger["formid"] = new EntityReference("systemform", rule.ProcessTriggerFormId.Value);
             trigger["scope"] = new OptionSetValue(rule.ProcessTriggerScope ?? 1); // 1 = Form
             service.Create(trigger);
+        }
+
+        // Activate if requested (BPFs must be activated for Dynamics to create backing entity/stages)
+        if (rule.ActivateOnCreate)
+        {
+            var activate = new SetStateRequest
+            {
+                EntityMoniker = new EntityReference("workflow", id),
+                State = new OptionSetValue(1),   // Activated
+                Status = new OptionSetValue(2),  // Activated
+            };
+            service.Execute(activate);
+
+            // For BPFs: activation creates a backing entity that must also be added to the solution.
+            // The backing entity name is stored in the workflow's "uniquename" field after activation.
+            if (rule.Category == 4 && !string.IsNullOrEmpty(solutionUniqueName))
+            {
+                var workflow = service.Retrieve("workflow", id, new ColumnSet("uniquename"));
+                var bpfEntityName = workflow.GetAttributeValue<string>("uniquename");
+                if (!string.IsNullOrEmpty(bpfEntityName))
+                {
+                    // Resolve the entity's MetadataId
+                    var entityQuery = new QueryExpression("entity")
+                    {
+                        ColumnSet = new ColumnSet("entityid"),
+                        Criteria = new FilterExpression
+                        {
+                            Conditions =
+                            {
+                                new ConditionExpression("logicalname", ConditionOperator.Equal, bpfEntityName)
+                            }
+                        }
+                    };
+                    var entityResult = service.RetrieveMultiple(entityQuery).Entities.FirstOrDefault();
+                    if (entityResult != null)
+                    {
+                        var addEntityRequest = new AddSolutionComponentRequest
+                        {
+                            ComponentId = entityResult.Id,
+                            ComponentType = 1, // Entity
+                            SolutionUniqueName = solutionUniqueName
+                        };
+                        service.Execute(addEntityRequest);
+                    }
+                }
+            }
         }
 
         return id;

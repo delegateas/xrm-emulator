@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
 
@@ -25,7 +26,23 @@ public static class SolutionExporter
             SolutionName = solutionUniqueName,
             Managed = false
         };
-        var response = (ExportSolutionResponse)service.Execute(request);
+
+        OrganizationResponse rawResponse;
+        try
+        {
+            rawResponse = service.Execute(request);
+        }
+        catch (Exception ex)
+        {
+            // Try to extract detailed error from HTTP response body
+            var detail = ExtractHttpResponseDetail(ex);
+            if (detail != null)
+                throw new InvalidOperationException(
+                    $"Solution export failed for '{solutionUniqueName}': {detail}", ex);
+            throw;
+        }
+
+        var response = (ExportSolutionResponse)rawResponse;
         File.WriteAllBytes(zipPath, response.ExportSolutionFile);
 
         // Unpack using pac CLI via dnx
@@ -52,5 +69,48 @@ public static class SolutionExporter
             throw new InvalidOperationException(
                 $"pac solution unpack failed with exit code {process.ExitCode}: {output}");
         }
+    }
+
+    /// <summary>
+    /// Extracts the HTTP response body from Dataverse SDK exceptions.
+    /// The SDK wraps HTTP errors in HttpOperationException which has a Response.Content property
+    /// accessible via reflection (since the concrete type varies by SDK version).
+    /// </summary>
+    private static string? ExtractHttpResponseDetail(Exception ex)
+    {
+        // Walk the exception chain looking for HTTP response details
+        var current = ex;
+        while (current != null)
+        {
+            var typeName = current.GetType().Name;
+
+            // HttpOperationException from Microsoft.Rest.ClientRuntime
+            if (typeName.Contains("HttpOperation", StringComparison.OrdinalIgnoreCase))
+            {
+                // Try Response.Content via reflection
+                var responseProp = current.GetType().GetProperty("Response",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (responseProp?.GetValue(current) is { } response)
+                {
+                    var contentProp = response.GetType().GetProperty("Content",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    if (contentProp?.GetValue(response) is string content && !string.IsNullOrWhiteSpace(content))
+                        return content;
+                }
+            }
+
+            // FaultException<OrganizationServiceFault>
+            if (typeName.Contains("FaultException", StringComparison.OrdinalIgnoreCase))
+            {
+                var detailProp = current.GetType().GetProperty("Detail",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (detailProp?.GetValue(current) is OrganizationServiceFault fault)
+                    return fault.Message + (fault.InnerFault != null ? $" | Inner: {fault.InnerFault.Message}" : "");
+            }
+
+            current = current.InnerException;
+        }
+
+        return null;
     }
 }

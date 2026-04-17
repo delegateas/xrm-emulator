@@ -15,4 +15,5 @@ public record NewAttributeDefinition
     public string? Description { get; init; }
     public required string SolutionUniqueName { get; init; }     // Solution to add the component to
     public string? Action { get; init; }                         // "create" (default) or "update" — update modifies an existing attribute
+    public List<OptionDefinition>? Options { get; init; }        // For picklist: local option values [{ "value": 100000000, "label": "4 Timer" }]
 }
