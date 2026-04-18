@@ -161,6 +161,10 @@ try
     {
         HandleImportCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("associations", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleAssociationsCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pcf", StringComparison.OrdinalIgnoreCase))
     {
         HandlePcfCommand(positionalArgs, args);
@@ -168,6 +172,10 @@ try
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("security-role", StringComparison.OrdinalIgnoreCase))
     {
         HandleSecurityRoleCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("workflow", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleWorkflowCommand(positionalArgs, args);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("optionset", StringComparison.OrdinalIgnoreCase))
     {
@@ -1373,38 +1381,36 @@ static void HandleFormsTypeNewCommand(string[] positionalArgs, string[] allArgs,
   <systemform>
     <objecttypecode>{entityLogicalName}</objecttypecode>
     <type>2</type>
-    <formxml>
-      <form>
-        <tabs>
-          <tab name=""general"" id=""{{generated}}"" IsUserDefined=""1"" locklevel=""0"" showlabel=""true"" expanded=""true"">
-            <labels>
-              <label description=""{System.Security.SecurityElement.Escape(formName)}"" languagecode=""1030"" />
-            </labels>
-            <columns>
-              <column width=""100%"">
-                <sections>
-                  <section name=""general_section"" id=""{{generated}}"" IsUserDefined=""1"" showlabel=""true"" showbar=""false"" locklevel=""0"" columns=""2"" labelwidth=""115"">
-                    <labels>
-                      <label description=""General"" languagecode=""1030"" />
-                    </labels>
-                    <rows>
-                      <row>
-                        <cell id=""{{generated}}"">
-                          <labels>
-                            <label description=""{System.Security.SecurityElement.Escape(primaryNameField)}"" languagecode=""1030"" />
-                          </labels>
-                          <control id=""{primaryNameField}"" classid=""{{4273edbd-ac1d-40d3-9fb2-095c621b552d}}"" datafieldname=""{primaryNameField}"" />
-                        </cell>
-                      </row>
-                    </rows>
-                  </section>
-                </sections>
-              </column>
-            </columns>
-          </tab>
-        </tabs>
-      </form>
-    </formxml>
+    <form>
+      <tabs>
+        <tab name=""general"" id=""{{generated}}"" IsUserDefined=""1"" locklevel=""0"" showlabel=""true"" expanded=""true"">
+          <labels>
+            <label description=""{System.Security.SecurityElement.Escape(formName)}"" languagecode=""1030"" />
+          </labels>
+          <columns>
+            <column width=""100%"">
+              <sections>
+                <section name=""general_section"" id=""{{generated}}"" IsUserDefined=""1"" showlabel=""true"" showbar=""false"" locklevel=""0"" columns=""2"" labelwidth=""115"">
+                  <labels>
+                    <label description=""General"" languagecode=""1030"" />
+                  </labels>
+                  <rows>
+                    <row>
+                      <cell id=""{{generated}}"">
+                        <labels>
+                          <label description=""{System.Security.SecurityElement.Escape(primaryNameField)}"" languagecode=""1030"" />
+                        </labels>
+                        <control id=""{primaryNameField}"" classid=""{{4273edbd-ac1d-40d3-9fb2-095c621b552d}}"" datafieldname=""{primaryNameField}"" />
+                      </cell>
+                    </row>
+                  </rows>
+                </section>
+              </sections>
+            </column>
+          </columns>
+        </tab>
+      </tabs>
+    </form>
     <LocalizedNames>
       <LocalizedName description=""{System.Security.SecurityElement.Escape(formName)}"" languagecode=""1030"" />
     </LocalizedNames>
@@ -2590,6 +2596,7 @@ static void HandleEntityNewCommand(string[] positionalArgs, string[] allArgs)
         DisplayNamePlural = plural,
         PrimaryAttributeSchemaName = $"{schemaName.Split('_')[0]}_Name",
         PrimaryAttributeDisplayName = "Navn",
+        Description = description,
         SolutionUniqueName = metadata.Solution.UniqueName,
         Attributes = [],
     };
@@ -3348,11 +3355,171 @@ static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
         case "update":
             HandleSecurityRoleUpdateCommand(positionalArgs);
             break;
+        case "assign":
+            HandleSecurityRoleAssignCommand(positionalArgs);
+            break;
         default:
             PrintSecurityRoleUsage();
             Environment.Exit(1);
             break;
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// workflow activate — stage activation of an existing draft workflow
+// ──────────────────────────────────────────────────────────────
+static void HandleWorkflowCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 2)
+    {
+        PrintWorkflowUsage();
+        Environment.Exit(1);
+    }
+    var sub = positionalArgs[1].ToLowerInvariant();
+    if (sub == "activate")
+        HandleWorkflowActivateCommand(positionalArgs, allArgs);
+    else if (sub == "remove-from-solution")
+        HandleWorkflowRemoveFromSolutionCommand(positionalArgs, allArgs);
+    else
+    {
+        PrintWorkflowUsage();
+        Environment.Exit(1);
+    }
+}
+
+static void PrintWorkflowUsage()
+{
+    AnsiConsole.MarkupLine("[bold]MetadataSync workflow[/] — manage workflows / BPFs");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]activate[/] <workflow-name> [--solution <name>]");
+    AnsiConsole.MarkupLine("    Stage activation of an existing draft workflow / BPF. For BPFs, also adds the");
+    AnsiConsole.MarkupLine("    backing entity to the solution so it exports cleanly.");
+    AnsiConsole.MarkupLine("    [grey]Example: workflow activate \"Salgsproces uden lead KF\"[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]remove-from-solution[/] <workflow-name> [--solution <name>]");
+    AnsiConsole.MarkupLine("    Stage removal of a workflow from a solution (does NOT delete the workflow).");
+    AnsiConsole.MarkupLine("    Useful as a temp fix when a draft workflow blocks solution export.");
+    AnsiConsole.MarkupLine("    [grey]Example: workflow remove-from-solution \"Salgsproces uden lead KF\"[/]");
+}
+
+static void HandleWorkflowActivateCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] workflow activate <workflow-name> [[--solution <name>]]");
+        Environment.Exit(1);
+    }
+    var workflowName = positionalArgs[2];
+    var solutionOverride = GetFlagValue(allArgs, "--solution");
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "WorkflowActivations");
+    Directory.CreateDirectory(pendingDir);
+
+    var safe = workflowName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safe}.workflowactivation.json");
+
+    var def = new WorkflowActivationDefinition
+    {
+        WorkflowName = workflowName,
+        SolutionUniqueName = solutionOverride
+    };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged activation:[/] {workflowName}");
+    if (!string.IsNullOrEmpty(solutionOverride))
+        AnsiConsole.MarkupLine($"[grey]Backing entity will be added to solution: {solutionOverride}[/]");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine("[grey]Run [/][blue]commit[/][grey] to apply.[/]");
+}
+
+static string? GetFlagValue(string[] args, string flag)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+        if (args[i].Equals(flag, StringComparison.OrdinalIgnoreCase))
+            return args[i + 1];
+    return null;
+}
+
+static void HandleWorkflowRemoveFromSolutionCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] workflow remove-from-solution <workflow-name> [[--solution <name>]]");
+        Environment.Exit(1);
+    }
+    var workflowName = positionalArgs[2];
+    var solutionOverride = GetFlagValue(allArgs, "--solution");
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "WorkflowActivations");
+    Directory.CreateDirectory(pendingDir);
+
+    var safe = workflowName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safe}.workflowremovefromsolution.json");
+
+    var def = new WorkflowRemoveFromSolutionDefinition
+    {
+        WorkflowName = workflowName,
+        SolutionUniqueName = solutionOverride
+    };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged remove-from-solution:[/] {workflowName}");
+    if (!string.IsNullOrEmpty(solutionOverride))
+        AnsiConsole.MarkupLine($"[grey]Solution override: {solutionOverride}[/]");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine("[grey]Run [/][blue]commit[/][grey] to apply.[/]");
+}
+
+static void HandleSecurityRoleAssignCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 4)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] security-role assign <role-name> <user>");
+        AnsiConsole.MarkupLine("[grey]<user> can be: applicationid full name (APPUSER-...), domain name, full name, email, or systemuserid GUID[/]");
+        AnsiConsole.MarkupLine("[grey]Example: security-role assign \"_Role_LeadData_Ingest\" APPUSER-CRM-KF-DEV-ENV-PARTNERSEREVICE[/]");
+        Environment.Exit(1);
+    }
+
+    var roleName = positionalArgs[2];
+    var user = positionalArgs[3];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SecurityRoleAssignments");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeRole = roleName.Replace(" ", "_").Replace("/", "_");
+    var safeUser = user.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeRole}__{safeUser}.securityroleassignment.json");
+
+    var def = new SecurityRoleAssignmentDefinition { RoleName = roleName, User = user };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged assignment:[/] {roleName} → {user}");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine($"[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 static void PrintSecurityRoleUsage()
@@ -3368,6 +3535,11 @@ static void PrintSecurityRoleUsage()
     AnsiConsole.MarkupLine("  [yellow]update[/] <role-name>");
     AnsiConsole.MarkupLine("    Checkout security role for editing. Creates a pending file to edit manually.");
     AnsiConsole.MarkupLine("    [grey]Example: security-role update \"Partner Service\"[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]assign[/] <role-name> <user>");
+    AnsiConsole.MarkupLine("    Assign a security role to a systemuser/app user.");
+    AnsiConsole.MarkupLine("    [grey]<user>: applicationid full name, domain name, email, full name, or systemuserid GUID[/]");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role assign \"_Role_LeadData_Ingest\" APPUSER-CRM-KF-DEV-ENV-PARTNERSEREVICE[/]");
 }
 
 static void HandleSecurityRoleAddCommand(string[] positionalArgs)
@@ -3385,7 +3557,7 @@ static void HandleSecurityRoleAddCommand(string[] positionalArgs)
     var depth = positionalArgs.Length > 5 ? positionalArgs[5] : "Global";
 
     // Validate access type
-    var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share" };
+    var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share", "merge" };
     if (!validAccess.Contains(access.ToLowerInvariant()))
     {
         AnsiConsole.MarkupLine($"[red]Invalid access type:[/] '{access}'. Valid: {string.Join(", ", validAccess.Select(a => char.ToUpper(a[0]) + a[1..]))}");
@@ -3951,15 +4123,27 @@ static Dictionary<string, string> BuildFieldTypeHints(List<string> fields, strin
 
 // ──────────────────────────────────────────────────────────────
 // relationship update <schema-name> --delete <behavior> [--assign <behavior>] ...
+// relationship new-manytomany <schema-name> --entity1 <logical> --entity2 <logical> [--intersect <name>]
 // ──────────────────────────────────────────────────────────────
 static void HandleRelationshipCommand(string[] positionalArgs, string[] allArgs)
 {
+    if (positionalArgs.Length >= 2 &&
+        positionalArgs[1].Equals("new-manytomany", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleRelationshipNewManyToManyCommand(positionalArgs, allArgs);
+        return;
+    }
+
     if (positionalArgs.Length < 3 || !positionalArgs[1].Equals("update", StringComparison.OrdinalIgnoreCase))
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync relationship update <schema-name> --delete <behavior>");
-        AnsiConsole.MarkupLine("[grey]Behaviors: Cascade, RemoveLink, Restrict, NoCascade[/]");
-        AnsiConsole.MarkupLine("[grey]Options: --delete, --assign, --share, --unshare, --reparent, --merge[/]");
-        AnsiConsole.MarkupLine("[grey]Example: relationship update kf_partnerformline_PartnerForm_kf_partnerforms --delete Cascade[/]");
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  relationship update <schema-name> --delete <behavior> [[--assign <behavior>] ...]");
+        AnsiConsole.MarkupLine("  relationship new-manytomany <schema-name> --entity1 <logical> --entity2 <logical> [[--intersect <name>]]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]update behaviors: Cascade, RemoveLink, Restrict, NoCascade[/]");
+        AnsiConsole.MarkupLine("[grey]update options: --delete, --assign, --share, --unshare, --reparent, --merge[/]");
+        AnsiConsole.MarkupLine("[grey]Example (update):         relationship update kf_partnerformline_PartnerForm_kf_partnerforms --delete Cascade[/]");
+        AnsiConsole.MarkupLine("[grey]Example (new-manytomany): relationship new-manytomany kf_leaddistributionregion_systemuser --entity1 kf_leaddistributionregion --entity2 systemuser[/]");
         Environment.Exit(1);
     }
 
@@ -4012,6 +4196,74 @@ static void HandleRelationshipCommand(string[] positionalArgs, string[] allArgs)
     if (reparentBehavior != null) AnsiConsole.MarkupLine($"  Reparent:     {reparentBehavior}");
     if (mergeBehavior != null) AnsiConsole.MarkupLine($"  Merge:        {mergeBehavior}");
     AnsiConsole.MarkupLine($"  File:         {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// relationship new-manytomany <schema-name> --entity1 <logical> --entity2 <logical> [--intersect <name>]
+// ──────────────────────────────────────────────────────────────
+static void HandleRelationshipNewManyToManyCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync relationship new-manytomany[/] — scaffold a new N:N relationship");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  relationship new-manytomany <schema-name> --entity1 <logical> --entity2 <logical> [[--intersect <name>]]");
+        AnsiConsole.MarkupLine("    [grey]Schema name should include publisher prefix (e.g. kf_regionuser).[/]");
+        AnsiConsole.MarkupLine("    [grey]--intersect defaults to the schema name (most common pattern).[/]");
+        AnsiConsole.MarkupLine("    [grey]Optional: --menu-label-1 / --menu-label-2 override the 'Related' menu labels.[/]");
+        AnsiConsole.MarkupLine("    [grey]Example: relationship new-manytomany kf_leaddistributionregion_systemuser \\[/]");
+        AnsiConsole.MarkupLine("    [grey]           --entity1 kf_leaddistributionregion --entity2 systemuser[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    var schemaName = positionalArgs[2];
+    var entity1 = ParseNamedArg(allArgs, "--entity1");
+    var entity2 = ParseNamedArg(allArgs, "--entity2");
+    var intersectName = ParseNamedArg(allArgs, "--intersect");
+    var menuLabel1 = ParseNamedArg(allArgs, "--menu-label-1");
+    var menuLabel2 = ParseNamedArg(allArgs, "--menu-label-2");
+
+    if (string.IsNullOrWhiteSpace(entity1) || string.IsNullOrWhiteSpace(entity2))
+    {
+        AnsiConsole.MarkupLine("[red]--entity1 and --entity2 are required.[/]");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Relationships");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new ManyToManyRelationshipDefinition
+    {
+        SchemaName = schemaName,
+        Entity1LogicalName = entity1,
+        Entity2LogicalName = entity2,
+        IntersectEntityName = intersectName,
+        Entity1MenuLabel = menuLabel1,
+        Entity2MenuLabel = menuLabel2,
+        SolutionUniqueName = metadata.Solution?.UniqueName,
+    };
+
+    var destPath = Path.Combine(pendingDir, $"{schemaName}.manytomany.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    }));
+
+    AnsiConsole.MarkupLine($"[green]N:N relationship staged:[/]");
+    AnsiConsole.MarkupLine($"  Schema:    {schemaName}");
+    AnsiConsole.MarkupLine($"  Entity 1:  {entity1}");
+    AnsiConsole.MarkupLine($"  Entity 2:  {entity2}");
+    AnsiConsole.MarkupLine($"  Intersect: {intersectName ?? schemaName.ToLowerInvariant()}");
+    AnsiConsole.MarkupLine($"  Solution:  {definition.SolutionUniqueName ?? "<none>"}");
+    AnsiConsole.MarkupLine($"  File:      {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
 }
@@ -4792,6 +5044,78 @@ static void HandleIconSetCommand(string[] positionalArgs)
 // ──────────────────────────────────────────────────────────────
 // pending — list all staged changes in _pending/
 // ──────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
+// associations import <relationship> <file>
+//   Stages an N:N pair file — resolves each side by match-on attribute at commit time.
+// ──────────────────────────────────────────────────────────────
+static void HandleAssociationsCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 4 || !positionalArgs[1].Equals("import", StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync associations import[/] — stage an N:N pairs file");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  associations import <relationship-schema> <file>");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]File format (JSON):[/]");
+        AnsiConsole.WriteLine("    {");
+        AnsiConsole.WriteLine("      \"relationship\": \"<n:n-schema-name>\",");
+        AnsiConsole.WriteLine("      \"entity1\": { \"table\": \"<entity1>\", \"matchOn\": \"<attr>\" },");
+        AnsiConsole.WriteLine("      \"entity2\": { \"table\": \"<entity2>\", \"matchOn\": \"<attr>\" },");
+        AnsiConsole.WriteLine("      \"pairs\": [ {\"entity1\": \"<value>\", \"entity2\": \"<value>\"}, ... ]");
+        AnsiConsole.WriteLine("    }");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Example: associations import kf_leaddistributionregion_postnummer region-zips.json[/]");
+        Environment.Exit(positionalArgs.Length < 4 ? 1 : 0);
+        return;
+    }
+
+    var relationship = positionalArgs[2];
+    var sourceFile = positionalArgs[3];
+
+    if (!File.Exists(sourceFile))
+    {
+        AnsiConsole.MarkupLine($"[red]File not found:[/] {sourceFile}");
+        Environment.Exit(1);
+    }
+
+    // Validate
+    AssociationsImportDefinition parsed;
+    try
+    {
+        var json = File.ReadAllText(sourceFile);
+        parsed = JsonSerializer.Deserialize<AssociationsImportDefinition>(json,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidOperationException("Empty file");
+        if (string.IsNullOrEmpty(parsed.Relationship)) throw new InvalidOperationException("Missing 'relationship'");
+        if (parsed.Entity1 is null || parsed.Entity2 is null) throw new InvalidOperationException("Missing 'entity1' or 'entity2'");
+        if (parsed.Pairs is null || parsed.Pairs.Count == 0) throw new InvalidOperationException("Missing or empty 'pairs'");
+        if (!string.Equals(parsed.Relationship, relationship, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Relationship in file ({parsed.Relationship}) doesn't match argument ({relationship})");
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid associations file:[/] {ex.Message}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Associations");
+    Directory.CreateDirectory(pendingDir);
+    var destPath = Path.Combine(pendingDir, $"{relationship}.associations.json");
+    File.Copy(sourceFile, destPath, overwrite: true);
+
+    AnsiConsole.MarkupLine($"[green]Associations file staged:[/]");
+    AnsiConsole.MarkupLine($"  Relationship: {relationship}");
+    AnsiConsole.MarkupLine($"  Pairs:        {parsed.Pairs.Count}");
+    AnsiConsole.MarkupLine($"  Entity1:      {parsed.Entity1.Table}.{parsed.Entity1.MatchOn}");
+    AnsiConsole.MarkupLine($"  Entity2:      {parsed.Entity2.Table}.{parsed.Entity2.MatchOn}");
+    AnsiConsole.MarkupLine($"  File:         {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to associate the pairs in CRM.[/]");
+}
+
 static void HandlePendingCommand()
 {
     var metadataPath = FindConnectionMetadata();

@@ -348,6 +348,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Associations imports (N:N pairs between existing records)
+        var pendingAssociationsFiles = Directory.GetFiles(pendingDir, "*.associations.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingAssociationsFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<AssociationsImportDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.AssociationsImport,
+                $"Associations: {parsed.Relationship} ({parsed.Pairs.Count} pair(s), {parsed.Entity1.Table}↔{parsed.Entity2.Table})",
+                f, parsed));
+        }
+
         // Security role updates
         var pendingSecurityRoleFiles = Directory.GetFiles(pendingDir, "*.securityrole.json", SearchOption.AllDirectories)
             .ToList();
@@ -358,6 +371,45 @@ public static class CommitPipeline
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
             commitItems.Add(new CommitItem(CommitItemType.SecurityRoleUpdate,
                 $"Security Role: {parsed.RoleName} ({parsed.Privileges.Count} privilege(s))",
+                f, parsed));
+        }
+
+        // Security role assignments (role → user associations)
+        var pendingSecurityRoleAssignmentFiles = Directory.GetFiles(pendingDir, "*.securityroleassignment.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSecurityRoleAssignmentFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SecurityRoleAssignmentDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SecurityRoleAssignment,
+                $"Role Assignment: {parsed.RoleName} → {parsed.User}",
+                f, parsed));
+        }
+
+        // Workflow activations (activate existing draft BPFs / business rules + add backing entity to solution)
+        var pendingWorkflowActivationFiles = Directory.GetFiles(pendingDir, "*.workflowactivation.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingWorkflowActivationFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<WorkflowActivationDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.WorkflowActivation,
+                $"Workflow Activation: {parsed.WorkflowName}",
+                f, parsed));
+        }
+
+        // Workflow remove-from-solution (does NOT delete the workflow — only removes solution membership)
+        var pendingWorkflowRemoveFiles = Directory.GetFiles(pendingDir, "*.workflowremovefromsolution.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingWorkflowRemoveFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<WorkflowRemoveFromSolutionDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.WorkflowRemoveFromSolution,
+                $"Workflow Remove from Solution: {parsed.WorkflowName}",
                 f, parsed));
         }
 
@@ -405,6 +457,19 @@ public static class CommitPipeline
             if (parsed.MergeBehavior != null) changes.Add($"Merge={parsed.MergeBehavior}");
             commitItems.Add(new CommitItem(CommitItemType.RelationshipUpdate,
                 $"Relationship: {parsed.SchemaName} ({string.Join(", ", changes)})",
+                f, parsed));
+        }
+
+        // New N:N relationships
+        var pendingManyToManyFiles = Directory.GetFiles(pendingDir, "*.manytomany.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingManyToManyFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<ManyToManyRelationshipDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+            commitItems.Add(new CommitItem(CommitItemType.NewManyToManyRelationship,
+                $"N:N Relationship: {parsed.SchemaName} ({parsed.Entity1LogicalName} ↔ {parsed.Entity2LogicalName})",
                 f, parsed));
         }
 
@@ -498,7 +563,11 @@ public static class CommitPipeline
             [CommitItemType.AddSolutionComponent] = 2,
             [CommitItemType.Entity] = 2,
             [CommitItemType.StatusValue] = 2,
+            [CommitItemType.NewManyToManyRelationship] = 2, // After entities exist, before views/forms reference them
             [CommitItemType.SecurityRoleUpdate] = 3,
+            [CommitItemType.SecurityRoleAssignment] = 17,
+            [CommitItemType.WorkflowActivation] = 8, // After BusinessRule, before AppModule components
+            [CommitItemType.WorkflowRemoveFromSolution] = 8,
             [CommitItemType.WebResourceUpload] = 3,
             [CommitItemType.IconUpload] = 4,
             [CommitItemType.IconSet] = 5,
@@ -517,6 +586,7 @@ public static class CommitPipeline
             [CommitItemType.SlaKpi] = 14,  // Before SLA items — items reference KPIs
             [CommitItemType.SlaItem] = 15,
             [CommitItemType.DataImport] = 16,
+            [CommitItemType.AssociationsImport] = 17, // After DataImport — associations need records on both sides to exist
             [CommitItemType.RelationshipUpdate] = 17,
             [CommitItemType.Delete] = 18,
             [CommitItemType.Deprecate] = 19,
@@ -1697,11 +1767,53 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.NewManyToManyRelationship:
+                    {
+                        var def = (ManyToManyRelationshipDefinition)item.ParsedData;
+                        log?.Invoke($"Creating N:N relationship: {def.SchemaName}");
+                        var relId = ManyToManyRelationshipWriter.Create(client, def,
+                            def.SolutionUniqueName ?? metadata.Solution?.UniqueName);
+                        log?.Invoke($"  N:N relationship created OK. ID: {relId}");
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = relId.ToString() };
+                        break;
+                    }
+
                     case CommitItemType.SecurityRoleUpdate:
                     {
                         var def = (SecurityRoleUpdateDefinition)item.ParsedData;
                         log?.Invoke($"Updating security role: {def.RoleName}");
                         SecurityRoleWriter.UpdatePrivileges(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.SecurityRoleAssignment:
+                    {
+                        var def = (SecurityRoleAssignmentDefinition)item.ParsedData;
+                        log?.Invoke($"Assigning role: {def.RoleName} → {def.User}");
+                        SecurityRoleWriter.AssignToUser(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.WorkflowActivation:
+                    {
+                        var def = (WorkflowActivationDefinition)item.ParsedData;
+                        var workflowId = BusinessRuleWriter.FindWorkflowByName(client, def.WorkflowName)
+                            ?? throw new InvalidOperationException($"Workflow '{def.WorkflowName}' not found.");
+                        var solution = def.SolutionUniqueName ?? metadata.Solution?.UniqueName;
+                        log?.Invoke($"Activating workflow: {def.WorkflowName} ({workflowId})");
+                        BusinessRuleWriter.ActivateExistingWorkflow(client, workflowId, solution, log);
+                        break;
+                    }
+
+                    case CommitItemType.WorkflowRemoveFromSolution:
+                    {
+                        var def = (WorkflowRemoveFromSolutionDefinition)item.ParsedData;
+                        var workflowId = BusinessRuleWriter.FindWorkflowByName(client, def.WorkflowName)
+                            ?? throw new InvalidOperationException($"Workflow '{def.WorkflowName}' not found.");
+                        var solution = def.SolutionUniqueName ?? metadata.Solution?.UniqueName
+                            ?? throw new InvalidOperationException("No solution specified and env has no default solution.");
+                        log?.Invoke($"Removing workflow from solution: {def.WorkflowName} → {solution}");
+                        BusinessRuleWriter.RemoveWorkflowFromSolution(client, workflowId, solution, log);
                         break;
                     }
 
@@ -1838,6 +1950,15 @@ public static class CommitPipeline
                             }
                         }
                         log?.Invoke($"  Import complete: {created} created, {updated} updated.");
+                        break;
+                    }
+
+                    case CommitItemType.AssociationsImport:
+                    {
+                        var def = (AssociationsImportDefinition)item.ParsedData;
+                        log?.Invoke($"Importing {def.Pairs.Count} N:N pair(s) for {def.Relationship}");
+                        var result = AssociationsImportWriter.Apply(client, def, log);
+                        log?.Invoke($"  {result.Created} created, {result.AlreadyExisted} already existed, {result.Unresolved} unresolved.");
                         break;
                     }
                 }

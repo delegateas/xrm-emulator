@@ -123,6 +123,138 @@ public static class BusinessRuleWriter
         return id;
     }
 
+    /// <summary>
+    /// Activates an existing workflow (business rule or BPF). For BPFs (category 4), also
+    /// adds the generated backing entity to the specified solution so it can be exported.
+    /// Idempotent — already-activated workflows are a no-op.
+    /// </summary>
+    public static void ActivateExistingWorkflow(
+        IOrganizationService service,
+        Guid workflowId,
+        string? solutionUniqueName,
+        Action<string>? log = null)
+    {
+        var existing = service.Retrieve("workflow", workflowId, new ColumnSet("statecode", "category", "uniquename", "name"));
+        var stateCode = existing.GetAttributeValue<OptionSetValue>("statecode")?.Value ?? 0;
+        var category = existing.GetAttributeValue<OptionSetValue>("category")?.Value ?? 0;
+        var name = existing.GetAttributeValue<string>("name") ?? "<unknown>";
+
+        if (stateCode != 1)
+        {
+            service.Execute(new SetStateRequest
+            {
+                EntityMoniker = new EntityReference("workflow", workflowId),
+                State = new OptionSetValue(1),   // Activated
+                Status = new OptionSetValue(2),  // Activated
+            });
+            log?.Invoke($"Activated workflow '{name}' ({workflowId})");
+        }
+        else
+        {
+            log?.Invoke($"Workflow '{name}' already activated — skip activation");
+        }
+
+        // For BPFs: ensure the backing entity is in the target solution.
+        if (category == 4 && !string.IsNullOrEmpty(solutionUniqueName))
+        {
+            var refreshed = service.Retrieve("workflow", workflowId, new ColumnSet("uniquename"));
+            var bpfEntityName = refreshed.GetAttributeValue<string>("uniquename");
+            if (string.IsNullOrEmpty(bpfEntityName))
+            {
+                log?.Invoke("  Warning: BPF uniquename is blank after activation — backing entity not added to solution.");
+                return;
+            }
+
+            var entityRow = service.RetrieveMultiple(new QueryExpression("entity")
+            {
+                ColumnSet = new ColumnSet("entityid"),
+                Criteria = new FilterExpression
+                {
+                    Conditions = { new ConditionExpression("logicalname", ConditionOperator.Equal, bpfEntityName) }
+                },
+                TopCount = 1
+            }).Entities.FirstOrDefault();
+
+            if (entityRow == null)
+            {
+                log?.Invoke($"  Warning: entity '{bpfEntityName}' not found in metadata.");
+                return;
+            }
+
+            try
+            {
+                service.Execute(new AddSolutionComponentRequest
+                {
+                    ComponentId = entityRow.Id,
+                    ComponentType = 1, // Entity
+                    SolutionUniqueName = solutionUniqueName
+                });
+                log?.Invoke($"  Added backing entity '{bpfEntityName}' to solution '{solutionUniqueName}'");
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                // "Component already exists" is fine — idempotent.
+                if (ex.Detail.ErrorCode == -2147220969 || ex.Detail.Message.Contains("already exists"))
+                    log?.Invoke($"  Backing entity '{bpfEntityName}' already in solution — skip");
+                else
+                    throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Remove a workflow from a solution (does NOT delete the workflow itself).
+    /// Useful to unblock solution export when a draft workflow is included in the solution.
+    /// </summary>
+    public static void RemoveWorkflowFromSolution(
+        IOrganizationService service,
+        Guid workflowId,
+        string solutionUniqueName,
+        Action<string>? log = null)
+    {
+        try
+        {
+            service.Execute(new Microsoft.Crm.Sdk.Messages.RemoveSolutionComponentRequest
+            {
+                ComponentId = workflowId,
+                ComponentType = 29, // Workflow
+                SolutionUniqueName = solutionUniqueName
+            });
+            log?.Invoke($"Removed workflow {workflowId} from solution '{solutionUniqueName}'");
+        }
+        catch (FaultException<OrganizationServiceFault> ex)
+        {
+            // "Component doesn't exist in solution" is fine — idempotent.
+            if (ex.Detail.Message.Contains("does not exist") || ex.Detail.Message.Contains("not found"))
+                log?.Invoke($"Workflow {workflowId} was not in solution '{solutionUniqueName}' — skip");
+            else
+                throw;
+        }
+    }
+
+    /// <summary>Find workflow by name across any primaryentity/category.</summary>
+    public static Guid? FindWorkflowByName(IOrganizationService service, string name)
+    {
+        var results = service.RetrieveMultiple(new QueryExpression("workflow")
+        {
+            ColumnSet = new ColumnSet("workflowid"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("name", ConditionOperator.Equal, name),
+                    new ConditionExpression("type", ConditionOperator.Equal, 1), // Definition
+                }
+            },
+            TopCount = 2
+        });
+        if (results.Entities.Count == 0) return null;
+        if (results.Entities.Count > 1)
+            throw new InvalidOperationException(
+                $"Multiple workflows named '{name}' found. Disambiguate by workflowid.");
+        return results.Entities[0].Id;
+    }
+
     public static void Update(IOrganizationService service, BusinessRuleDefinition rule)
     {
         // Check if the workflow is currently activated (statecode=1).

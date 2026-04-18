@@ -19,6 +19,8 @@ public static class CustomApiWriter
         CustomApiDefinition def,
         Action<string>? log = null)
     {
+        ValidateFieldLengths(def);
+
         // Resolve the plugin type ID from the assembly
         var pluginTypeId = FindPluginTypeByName(service, def.PluginTypeName)
             ?? throw new InvalidOperationException(
@@ -76,6 +78,33 @@ public static class CustomApiWriter
         UpsertResponseProperties(service, def, customApiId, log);
 
         return customApiId;
+    }
+
+    /// <summary>
+    /// Validate field lengths against Dataverse limits to fail early with a clear error
+    /// instead of a cryptic 400 response from the server.
+    /// </summary>
+    private static void ValidateFieldLengths(CustomApiDefinition def)
+    {
+        // Dataverse limits: name=256, displayname=256, description=100
+        var errors = new List<string>();
+
+        void CheckDescription(string label, string? description)
+        {
+            if (description != null && description.Length > 100)
+                errors.Add($"{label}: description is {description.Length} chars (max 100)");
+        }
+
+        CheckDescription($"Custom API '{def.UniqueName}'", def.Description);
+        foreach (var p in def.RequestParameters)
+            CheckDescription($"Request parameter '{p.UniqueName}'", p.Description);
+        foreach (var p in def.ResponseProperties)
+            CheckDescription($"Response property '{p.UniqueName}'", p.Description);
+
+        if (errors.Count > 0)
+            throw new InvalidOperationException(
+                $"Custom API '{def.UniqueName}' has field length violations:\n  " +
+                string.Join("\n  ", errors));
     }
 
     /// <summary>
