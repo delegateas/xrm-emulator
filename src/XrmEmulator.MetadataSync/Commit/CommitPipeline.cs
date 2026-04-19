@@ -473,6 +473,30 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Relationship metadata deletes
+        var pendingRelationshipDeleteFiles = Directory.GetFiles(pendingDir, "*.relationshipdelete.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingRelationshipDeleteFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<RelationshipDeleteDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+            commitItems.Add(new CommitItem(CommitItemType.RelationshipDelete,
+                $"Delete Relationship: {parsed.SchemaName}", f, parsed));
+        }
+
+        // Entity metadata deletes
+        var pendingEntityDeleteFiles = Directory.GetFiles(pendingDir, "*.entitydelete.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingEntityDeleteFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<EntityMetadataDeleteDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+            commitItems.Add(new CommitItem(CommitItemType.EntityMetadataDelete,
+                $"Delete Entity: {parsed.EntityLogicalName}", f, parsed));
+        }
+
         // PCF Controls
         var pendingPcfFiles = Directory.GetFiles(pendingDir, "*.pcf.json", SearchOption.AllDirectories)
             .ToList();
@@ -590,7 +614,9 @@ public static class CommitPipeline
             [CommitItemType.RelationshipUpdate] = 17,
             [CommitItemType.Delete] = 18,
             [CommitItemType.Deprecate] = 19,
-            [CommitItemType.RibbonWorkbench] = 20,
+            [CommitItemType.RelationshipDelete] = 20, // After record deletes (intersect rows gone) and before entity delete
+            [CommitItemType.EntityMetadataDelete] = 21, // Last — all references must be gone
+            [CommitItemType.RibbonWorkbench] = 22,
             [CommitItemType.EnableChangeTracking] = 2,
         };
         commitItems.Sort((a, b) =>
@@ -874,9 +900,30 @@ public static class CommitPipeline
                         var appMatch = appModules.FirstOrDefault(a =>
                             a.UniqueName.Equals(def.AppModuleUniqueName, StringComparison.OrdinalIgnoreCase));
 
-                        var currentIds = appMatch != default
+                        var allViewIdsInApp = appMatch != default
                             ? ReadAppModuleViewIds(appMatch.XmlPath)
                             : new HashSet<Guid>();
+
+                        // Scope to views belonging to this entity — otherwise toRemove
+                        // includes every other entity's views (which would wipe the app).
+                        // savedquery.returnedtypecode is Int32 ObjectTypeCode, not the logical name,
+                        // so resolve the entity's OTC first.
+                        var viewOtcResp = (RetrieveEntityResponse)client.Execute(new RetrieveEntityRequest
+                        {
+                            LogicalName = def.EntityLogicalName,
+                            EntityFilters = EntityFilters.Entity,
+                        });
+                        var viewOtc = viewOtcResp.EntityMetadata.ObjectTypeCode ?? 0;
+                        var entityViewQuery = new QueryExpression("savedquery")
+                        {
+                            ColumnSet = new ColumnSet("savedqueryid"),
+                            Criteria = new FilterExpression
+                            {
+                                Conditions = { new ConditionExpression("returnedtypecode", ConditionOperator.Equal, viewOtc) }
+                            }
+                        };
+                        var entityViewIds = client.RetrieveMultiple(entityViewQuery).Entities.Select(e => e.Id).ToHashSet();
+                        var currentIds = new HashSet<Guid>(allViewIdsInApp.Intersect(entityViewIds));
 
                         var desiredIds = new HashSet<Guid>(def.ViewIds);
                         var toAdd = desiredIds.Except(currentIds).ToList();
@@ -909,9 +956,23 @@ public static class CommitPipeline
                         var appMatch = appModules.FirstOrDefault(a =>
                             a.UniqueName.Equals(def.AppModuleUniqueName, StringComparison.OrdinalIgnoreCase));
 
-                        var currentIds = appMatch != default
+                        var allFormIdsInApp = appMatch != default
                             ? ReadAppModuleFormIds(appMatch.XmlPath)
                             : new HashSet<Guid>();
+
+                        // Scope to forms belonging to this entity — otherwise toRemove
+                        // includes every other entity's forms. systemform.objecttypecode is
+                        // the logical name as a string, so no OTC resolution needed here.
+                        var entityFormQuery = new QueryExpression("systemform")
+                        {
+                            ColumnSet = new ColumnSet("formid"),
+                            Criteria = new FilterExpression
+                            {
+                                Conditions = { new ConditionExpression("objecttypecode", ConditionOperator.Equal, def.EntityLogicalName) }
+                            }
+                        };
+                        var entityFormIds = client.RetrieveMultiple(entityFormQuery).Entities.Select(e => e.Id).ToHashSet();
+                        var currentIds = new HashSet<Guid>(allFormIdsInApp.Intersect(entityFormIds));
 
                         var desiredIds = new HashSet<Guid>(def.FormIds);
                         var toAdd = desiredIds.Except(currentIds).ToList();
@@ -1775,6 +1836,24 @@ public static class CommitPipeline
                             def.SolutionUniqueName ?? metadata.Solution?.UniqueName);
                         log?.Invoke($"  N:N relationship created OK. ID: {relId}");
                         resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = relId.ToString() };
+                        break;
+                    }
+
+                    case CommitItemType.RelationshipDelete:
+                    {
+                        var def = (RelationshipDeleteDefinition)item.ParsedData;
+                        log?.Invoke($"Deleting relationship: {def.SchemaName}");
+                        RelationshipDeleteWriter.Delete(client, def);
+                        log?.Invoke($"  Relationship deleted OK.");
+                        break;
+                    }
+
+                    case CommitItemType.EntityMetadataDelete:
+                    {
+                        var def = (EntityMetadataDeleteDefinition)item.ParsedData;
+                        log?.Invoke($"Deleting entity: {def.EntityLogicalName}");
+                        EntityMetadataDeleteWriter.Delete(client, def, log);
+                        log?.Invoke($"  Entity deleted OK.");
                         break;
                     }
 

@@ -36,7 +36,9 @@ public enum CommitItemType
     EnableChangeTracking,
     CustomApiRegistration,
     SlaItem,
-    SlaKpi
+    SlaKpi,
+    RelationshipDelete,
+    EntityMetadataDelete
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

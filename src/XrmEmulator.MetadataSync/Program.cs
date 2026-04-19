@@ -109,6 +109,11 @@ try
     {
         HandleEntityEnableChangeTrackingCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 3 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("delete", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleEntityDeleteCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase))
     {
         await HandleEntityCommand(positionalArgs, configuration, noCache);
@@ -768,10 +773,82 @@ static void HandleAppModuleCommand(string[] positionalArgs, string[] allArgs)
     {
         HandleAppModuleListCommand(positionalArgs, allArgs);
     }
+    else if (positionalArgs[1].Equals("remove-view", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleAppModuleRemoveViewCommand(positionalArgs, allArgs).GetAwaiter().GetResult();
+    }
     else
     {
         AnsiConsole.MarkupLine($"[red]Unknown appmodule subcommand:[/] {positionalArgs[1]}");
-        AnsiConsole.MarkupLine("[grey]Available: views, forms, entity, list[/]");
+        AnsiConsole.MarkupLine("[grey]Available: views, forms, entity, bpf, list, remove-view[/]");
+        Environment.Exit(1);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// appmodule remove-view <app-unique-name> <view-guid>
+// Direct RemoveAppComponentsRequest — skips the pending/diff pipeline because
+// that path has failed to produce a correct toRemove set in practice.
+// ──────────────────────────────────────────────────────────────
+static async Task HandleAppModuleRemoveViewCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 4)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] appmodule remove-view <app-unique-name> <view-guid>");
+        Environment.Exit(1);
+    }
+
+    var appUniqueName = positionalArgs[2];
+    if (!Guid.TryParse(positionalArgs[3], out var viewId))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid GUID:[/] {positionalArgs[3]}");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var configuration = new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache: false);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+
+    var appQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("appmodule")
+    {
+        ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("appmoduleid", "uniquename"),
+        Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+        {
+            Conditions = { new Microsoft.Xrm.Sdk.Query.ConditionExpression("uniquename", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, appUniqueName) }
+        },
+    };
+    var app = client.RetrieveMultiple(appQuery).Entities.FirstOrDefault()
+        ?? throw new InvalidOperationException($"AppModule '{appUniqueName}' not found.");
+
+    AnsiConsole.MarkupLine($"[grey]AppModule {appUniqueName} = {app.Id}[/]");
+    AnsiConsole.MarkupLine($"[grey]Removing view {viewId} ...[/]");
+
+    try
+    {
+        client.Execute(new Microsoft.Crm.Sdk.Messages.RemoveAppComponentsRequest
+        {
+            AppId = app.Id,
+            Components = new Microsoft.Xrm.Sdk.EntityReferenceCollection
+            {
+                new Microsoft.Xrm.Sdk.EntityReference("savedquery", viewId),
+            },
+        });
+        AnsiConsole.MarkupLine($"[green]RemoveAppComponents OK[/]");
+
+        // RemoveAppComponents alone leaves the appmodulecomponent row in place until
+        // the AppModule is re-published — that stale row blocks downstream deletes
+        // (e.g. deleting the savedquery itself).
+        client.Execute(new Microsoft.Crm.Sdk.Messages.PublishXmlRequest
+        {
+            ParameterXml = $"<importexportxml><appmodules><appmodule>{app.Id}</appmodule></appmodules></importexportxml>",
+        });
+        AnsiConsole.MarkupLine($"[green]PublishXml OK.[/]");
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]RemoveAppComponents/Publish failed:[/] {Markup.Escape(ex.Message)}");
         Environment.Exit(1);
     }
 }
@@ -4134,11 +4211,19 @@ static void HandleRelationshipCommand(string[] positionalArgs, string[] allArgs)
         return;
     }
 
+    if (positionalArgs.Length >= 3 &&
+        positionalArgs[1].Equals("delete", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleRelationshipDeleteCommand(positionalArgs, allArgs);
+        return;
+    }
+
     if (positionalArgs.Length < 3 || !positionalArgs[1].Equals("update", StringComparison.OrdinalIgnoreCase))
     {
         AnsiConsole.MarkupLine("[red]Usage:[/]");
         AnsiConsole.MarkupLine("  relationship update <schema-name> --delete <behavior> [[--assign <behavior>] ...]");
         AnsiConsole.MarkupLine("  relationship new-manytomany <schema-name> --entity1 <logical> --entity2 <logical> [[--intersect <name>]]");
+        AnsiConsole.MarkupLine("  relationship delete <schema-name>");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[grey]update behaviors: Cascade, RemoveLink, Restrict, NoCascade[/]");
         AnsiConsole.MarkupLine("[grey]update options: --delete, --assign, --share, --unshare, --reparent, --merge[/]");
@@ -4264,6 +4349,98 @@ static void HandleRelationshipNewManyToManyCommand(string[] positionalArgs, stri
     AnsiConsole.MarkupLine($"  Intersect: {intersectName ?? schemaName.ToLowerInvariant()}");
     AnsiConsole.MarkupLine($"  Solution:  {definition.SolutionUniqueName ?? "<none>"}");
     AnsiConsole.MarkupLine($"  File:      {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// relationship delete <schema-name>
+// ──────────────────────────────────────────────────────────────
+static void HandleRelationshipDeleteCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync relationship delete[/] — stage a relationship metadata delete");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  relationship delete <schema-name>");
+        AnsiConsole.MarkupLine("    [grey]Works for both 1:N and N:N. For N:N, the intersect entity is dropped automatically.[/]");
+        AnsiConsole.MarkupLine("    [grey]Dataverse rejects the delete if records still reference the relationship —[/]");
+        AnsiConsole.MarkupLine("    [grey]callers must clear associations (or delete the rows) first.[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    var schemaName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Deletes");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new RelationshipDeleteDefinition
+    {
+        SchemaName = schemaName,
+        SolutionUniqueName = metadata.Solution?.UniqueName,
+    };
+
+    var destPath = Path.Combine(pendingDir, $"{schemaName}.relationshipdelete.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Relationship delete staged:[/]");
+    AnsiConsole.MarkupLine($"  Schema:   {schemaName}");
+    AnsiConsole.MarkupLine($"  File:     {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// entity delete <logical-name>
+// ──────────────────────────────────────────────────────────────
+static void HandleEntityDeleteCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]MetadataSync entity delete[/] — stage a full-entity metadata delete");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("  entity delete <logical-name>");
+        AnsiConsole.MarkupLine("    [grey]Drops the table, its attributes, and any remaining relationships on it.[/]");
+        AnsiConsole.MarkupLine("    [grey]Dataverse refuses the delete if other tables still reference it, if records still exist,[/]");
+        AnsiConsole.MarkupLine("    [grey]or if views/forms/sitemap entries still point at it — clean those first.[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+        return;
+    }
+
+    var entityLogicalName = positionalArgs[2].ToLowerInvariant();
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Deletes");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new EntityMetadataDeleteDefinition
+    {
+        EntityLogicalName = entityLogicalName,
+        SolutionUniqueName = metadata.Solution?.UniqueName,
+    };
+
+    var destPath = Path.Combine(pendingDir, $"{entityLogicalName}.entitydelete.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Entity delete staged:[/]");
+    AnsiConsole.MarkupLine($"  Entity:  {entityLogicalName}");
+    AnsiConsole.MarkupLine($"  File:    {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
 }
