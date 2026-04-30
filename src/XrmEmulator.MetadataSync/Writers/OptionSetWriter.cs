@@ -2,12 +2,24 @@ using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Query;
 using XrmEmulator.MetadataSync.Models;
 
 namespace XrmEmulator.MetadataSync.Writers;
 
 public static class OptionSetWriter
 {
+    private static int GetOrgBaseLcid(IOrganizationService service)
+    {
+        var query = new QueryExpression("organization")
+        {
+            ColumnSet = new ColumnSet("languagecode"),
+            TopCount = 1
+        };
+        var result = service.RetrieveMultiple(query).Entities.FirstOrDefault();
+        return result?.GetAttributeValue<int?>("languagecode") ?? 1030;
+    }
+
     /// <summary>
     /// Add new values to a global option set in CRM.
     /// Creates the option set if it doesn't exist yet.
@@ -59,28 +71,55 @@ public static class OptionSetWriter
         }
         else
         {
-            // Add values to existing option set
-            var existingValues = optionSet.Options
-                .Select(o => o.Value ?? 0)
-                .ToHashSet();
+            // Index existing options by numeric value so we can detect inserts vs label updates.
+            var existingByValue = optionSet.Options
+                .Where(o => o.Value.HasValue)
+                .GroupBy(o => o.Value!.Value)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            // Resolve org base language once for label writes.
+            var lcid = GetOrgBaseLcid(service);
 
             foreach (var entry in def.Values)
             {
-                if (entry.Value.HasValue && existingValues.Contains(entry.Value.Value))
+                if (entry.Value.HasValue && existingByValue.TryGetValue(entry.Value.Value, out var existing))
                 {
-                    log?.Invoke($"  SKIP: Value {entry.Value} already exists in '{def.OptionSetName}'");
+                    var existingLabelText = existing.Label?.UserLocalizedLabel?.Label
+                        ?? existing.Label?.LocalizedLabels?.FirstOrDefault()?.Label;
+
+                    if (string.Equals(existingLabelText, entry.Label, StringComparison.Ordinal))
+                    {
+                        log?.Invoke($"  SKIP: Value {entry.Value} with label '{entry.Label}' already exists in '{def.OptionSetName}'");
+                        continue;
+                    }
+
+                    var updateRequest = new UpdateOptionValueRequest
+                    {
+                        OptionSetName = def.OptionSetName,
+                        Value = entry.Value.Value,
+                        Label = new Label(entry.Label, lcid),
+                    };
+
+                    if (!string.IsNullOrEmpty(entry.Description))
+                        updateRequest.Description = new Label(entry.Description, lcid);
+
+                    if (!string.IsNullOrEmpty(solutionUniqueName))
+                        updateRequest.SolutionUniqueName = solutionUniqueName;
+
+                    service.Execute(updateRequest);
+                    log?.Invoke($"  Updated value {entry.Value} label '{existingLabelText}' → '{entry.Label}' in '{def.OptionSetName}'");
                     continue;
                 }
 
                 var request = new InsertOptionValueRequest
                 {
                     OptionSetName = def.OptionSetName,
-                    Label = new Label(entry.Label, 1030),
+                    Label = new Label(entry.Label, lcid),
                     Value = entry.Value,
                 };
 
                 if (!string.IsNullOrEmpty(entry.Description))
-                    request.Description = new Label(entry.Description, 1030);
+                    request.Description = new Label(entry.Description, lcid);
 
                 if (!string.IsNullOrEmpty(solutionUniqueName))
                     request.SolutionUniqueName = solutionUniqueName;

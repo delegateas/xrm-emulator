@@ -62,21 +62,39 @@ public static class IconWriter
 
     /// <summary>
     /// Sets the IconVectorName on an entity's metadata.
+    /// Returns true if the update ran, false if it was skipped (e.g. virtual entity).
+    /// Virtual entities reject UpdateEntityRequest with
+    /// "You can't set the DataProvider of this entity to null", so we probe
+    /// the metadata first and no-op when the target is virtual — the SVG
+    /// web resource still gets uploaded.
     /// </summary>
-    public static void SetEntityIcon(
+    public static bool SetEntityIcon(
         IOrganizationService service,
         string entityLogicalName,
-        string webResourceName)
+        string webResourceName,
+        Action<string>? log = null)
     {
-        var request = new UpdateEntityRequest
+        var retrieve = (RetrieveEntityResponse)service.Execute(new RetrieveEntityRequest
+        {
+            LogicalName = entityLogicalName,
+            EntityFilters = EntityFilters.Entity,
+        });
+
+        if (retrieve.EntityMetadata?.DataProviderId != null
+            || retrieve.EntityMetadata?.IsLogicalEntity == true)
+        {
+            log?.Invoke($"  Skipped IconVectorName: '{entityLogicalName}' is a virtual entity.");
+            return false;
+        }
+
+        service.Execute(new UpdateEntityRequest
         {
             Entity = new EntityMetadata
             {
                 LogicalName = entityLogicalName,
                 IconVectorName = webResourceName
             }
-        };
-
-        service.Execute(request);
+        });
+        return true;
     }
 }

@@ -53,6 +53,100 @@ public static class AppModuleWriter
         });
     }
 
+    /// <summary>
+    /// Associate a security role with an AppModule (role map). Resolves the role to its
+    /// root-BU copy and issues AddAppComponentsRequest. Idempotent — if the role is already
+    /// in the app's role map, logs a notice and returns.
+    /// </summary>
+    public static void AddRole(
+        IOrganizationService service,
+        string appModuleUniqueName,
+        string roleName,
+        Action<string>? log = null)
+    {
+        var appModuleId = GetAppModuleId(service, appModuleUniqueName);
+
+        var rootBuId = GetRootBusinessUnitId(service);
+        var roleId = FindRoleInBusinessUnit(service, roleName, rootBuId)
+            ?? throw new InvalidOperationException(
+                $"Security role '{roleName}' not found in root business unit. " +
+                "AppModule role maps require the root-BU copy. Create the role in the root BU first.");
+
+        log?.Invoke($"Associating role '{roleName}' ({roleId}) with app '{appModuleUniqueName}' ({appModuleId})");
+
+        if (AppModuleHasRole(service, appModuleId, roleId))
+        {
+            log?.Invoke("  Role already in app map — no-op.");
+            return;
+        }
+
+        // AppModule↔role uses the appmoduleroles_association N:N relationship,
+        // not AddAppComponentsRequest (which silently no-ops for role components).
+        service.Execute(new AssociateRequest
+        {
+            Target = new EntityReference("appmodule", appModuleId),
+            RelatedEntities = new EntityReferenceCollection
+            {
+                new EntityReference("role", roleId)
+            },
+            Relationship = new Relationship("appmoduleroles_association")
+        });
+
+        log?.Invoke("  Role added to app map OK.");
+    }
+
+    private static Guid GetRootBusinessUnitId(IOrganizationService service)
+    {
+        var query = new QueryExpression("businessunit")
+        {
+            ColumnSet = new ColumnSet("businessunitid"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("parentbusinessunitid", ConditionOperator.Null) }
+            },
+            TopCount = 1
+        };
+        var result = service.RetrieveMultiple(query).Entities.FirstOrDefault()
+            ?? throw new InvalidOperationException("Root business unit not found.");
+        return result.Id;
+    }
+
+    private static Guid? FindRoleInBusinessUnit(IOrganizationService service, string roleName, Guid businessUnitId)
+    {
+        var query = new QueryExpression("role")
+        {
+            ColumnSet = new ColumnSet("roleid"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("name", ConditionOperator.Equal, roleName),
+                    new ConditionExpression("businessunitid", ConditionOperator.Equal, businessUnitId),
+                }
+            },
+            TopCount = 1
+        };
+        return service.RetrieveMultiple(query).Entities.FirstOrDefault()?.Id;
+    }
+
+    private static bool AppModuleHasRole(IOrganizationService service, Guid appModuleId, Guid roleId)
+    {
+        var query = new QueryExpression("appmoduleroles")
+        {
+            ColumnSet = new ColumnSet(false),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("appmoduleid", ConditionOperator.Equal, appModuleId),
+                    new ConditionExpression("roleid", ConditionOperator.Equal, roleId),
+                }
+            },
+            TopCount = 1
+        };
+        return service.RetrieveMultiple(query).Entities.Count > 0;
+    }
+
     public static void UpdateViewSelection(
         IOrganizationService service,
         string appModuleUniqueName,

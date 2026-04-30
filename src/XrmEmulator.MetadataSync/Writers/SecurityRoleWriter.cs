@@ -72,11 +72,22 @@ public static class SecurityRoleWriter
             return;
         }
 
+        // Deduplicate by privilege GUID — two JSON entries can resolve to the same
+        // underlying privilege (e.g. two system entities that share the Activity fallback),
+        // and AddPrivilegesRoleRequest fails with "privilege is duplicated" if sent twice.
+        var deduped = addedPrivileges
+            .GroupBy(p => p.PrivilegeId)
+            .Select(g => g.First())
+            .ToArray();
+
+        if (deduped.Length < addedPrivileges.Count)
+            log?.Invoke($"  Deduplicated {addedPrivileges.Count - deduped.Length} duplicate privilege GUID(s) before sending.");
+
         // Add all privileges in one call
         var request = new AddPrivilegesRoleRequest
         {
             RoleId = roleId,
-            Privileges = addedPrivileges.ToArray()
+            Privileges = deduped
         };
 
         try

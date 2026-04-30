@@ -104,6 +104,12 @@ try
     {
         HandleEntityAttributeAddCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 3 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("statusvalue", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[2].Equals("add", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleEntityStatusValueAddCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("entity", StringComparison.OrdinalIgnoreCase)
         && positionalArgs[1].Equals("enable-changetracking", StringComparison.OrdinalIgnoreCase))
     {
@@ -198,6 +204,10 @@ try
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("query", StringComparison.OrdinalIgnoreCase))
     {
         await HandleQueryCommand(positionalArgs, args, configuration, noCache);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("user", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleUserCommand(positionalArgs, args, configuration, noCache);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("delete", StringComparison.OrdinalIgnoreCase))
     {
@@ -749,7 +759,7 @@ static void HandleAppModuleCommand(string[] positionalArgs, string[] allArgs)
 {
     if (positionalArgs.Length < 2)
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule <views|forms|entity|bpf|list> ...");
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule <views|forms|entity|bpf|list|remove-view|add-role> ...");
         Environment.Exit(1);
     }
 
@@ -777,12 +787,97 @@ static void HandleAppModuleCommand(string[] positionalArgs, string[] allArgs)
     {
         HandleAppModuleRemoveViewCommand(positionalArgs, allArgs).GetAwaiter().GetResult();
     }
+    else if (positionalArgs[1].Equals("add-role", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleAppModuleAddRoleCommand(positionalArgs, allArgs);
+    }
     else
     {
         AnsiConsole.MarkupLine($"[red]Unknown appmodule subcommand:[/] {positionalArgs[1]}");
-        AnsiConsole.MarkupLine("[grey]Available: views, forms, entity, bpf, list, remove-view[/]");
+        AnsiConsole.MarkupLine("[grey]Available: views, forms, entity, bpf, list, remove-view, add-role[/]");
         Environment.Exit(1);
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// appmodule add-role <role-name> [--app <appmodule-unique-name>]
+//   Stages an AppModule↔role association (role map entry).
+//   Applied at commit via AppModuleWriter.AddRole.
+// ──────────────────────────────────────────────────────────────
+static void HandleAppModuleAddRoleCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync appmodule add-role <role-name> [[--app <appmodule-unique-name>]]");
+        AnsiConsole.MarkupLine("[grey]Associates a security role with an AppModule (role map). Applied at commit.[/]");
+        AnsiConsole.MarkupLine("[grey]--app is required when the environment contains more than one AppModule.[/]");
+        AnsiConsole.MarkupLine("[grey]Example: appmodule add-role \"Partner Manager\" --app kf_KFPartnerAdminApp[/]");
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+    }
+
+    var roleName = positionalArgs[2];
+    var appArg = ParseNamedArg(allArgs, "--app");
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Discover AppModules from local SolutionExport
+    var appModuleDirs = Directory.Exists(solutionExportDir)
+        ? Directory.GetDirectories(solutionExportDir, "AppModules", SearchOption.AllDirectories)
+        : [];
+
+    var appUniqueNames = appModuleDirs
+        .SelectMany(d => Directory.GetDirectories(d))
+        .Select(Path.GetFileName)
+        .Where(n => !string.IsNullOrEmpty(n))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(n => n!)
+        .ToList();
+
+    string appName;
+    if (!string.IsNullOrEmpty(appArg))
+    {
+        appName = appUniqueNames.FirstOrDefault(n => n.Equals(appArg, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"AppModule '{appArg}' not found under {solutionExportDir}. Available: {string.Join(", ", appUniqueNames)}");
+    }
+    else if (appUniqueNames.Count == 1)
+    {
+        appName = appUniqueNames[0];
+    }
+    else if (appUniqueNames.Count == 0)
+    {
+        AnsiConsole.MarkupLine($"[red]No AppModules found under[/] {solutionExportDir}");
+        Environment.Exit(1);
+        return;
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[red]Multiple AppModules present — pass --app <unique-name>:[/]");
+        foreach (var n in appUniqueNames)
+            AnsiConsole.MarkupLine($"  {Markup.Escape(n)}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "AppModuleRoles");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeApp = appName.Replace(" ", "_").Replace("/", "_");
+    var safeRole = roleName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeApp}__{safeRole}.appmodulerole.json");
+
+    var def = new AppModuleRoleDefinition { AppModuleUniqueName = appName, RoleName = roleName };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged app role map:[/] {Markup.Escape(roleName)} → {Markup.Escape(appName)}");
+    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(Path.GetRelativePath(baseDir, destPath))}[/]");
+    AnsiConsole.MarkupLine($"[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2000,14 +2095,18 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]appmodule forms[/] <entity> [[--app <name>]]             Configure AppModule form selection");
     AnsiConsole.MarkupLine("  [bold]appmodule entity add[/] <entity> [[--app <n>]]           Add entity to AppModule");
     AnsiConsole.MarkupLine("  [bold]appmodule list[/] [[--app <name>]]                       List AppModule components");
+    AnsiConsole.MarkupLine("  [bold]appmodule add-role[/] <role-name> [[--app <name>]]       Add a security role to an AppModule's role map");
     AnsiConsole.MarkupLine("  [bold]webresource new[/] <name> <file> [[--type js]]           Stage a new web resource upload");
     AnsiConsole.MarkupLine("  [bold]webresource checkout[/] <name>                         Checkout existing web resource for editing");
     AnsiConsole.MarkupLine("  [bold]commandbar[/] <app> [bold]add[/] <entity>                      Stage a new command bar button");
     AnsiConsole.MarkupLine("  [bold]commandbar[/] <app> [bold]edit[/] <name>                       Edit/customize an existing command bar button");
     AnsiConsole.MarkupLine("  [bold]ribbonworkbench hide[/] <entity> <button-id>            Hide a ribbon button via HideCustomAction");
+    AnsiConsole.MarkupLine("  [bold]ribbonworkbench checkout[/] <entity>                   Checkout entity RibbonDiff for CommandDefinition override");
     AnsiConsole.MarkupLine("  [bold]deprecate[/] <entity> <attribute>                       Deprecate a field (prefix display name with ZZ)");
-    AnsiConsole.MarkupLine("  [bold]optionset add-value[/] <name> <label> [--value <int>]  Add a value to a global option set");
+    AnsiConsole.MarkupLine("  [bold]optionset add-value[/] <name> <label> [[--value <int>]]  Add a value to a global option set");
+    AnsiConsole.MarkupLine("  [bold]entity statusvalue add[/] <entity> <label> --state <c> [[--value <int>]]  Add a statuscode value to an entity");
     AnsiConsole.MarkupLine("  [bold]delete[/] <entity> <guid> [[--cascade]]                Delete a record (--cascade removes restrict-delete children first)");
+    AnsiConsole.MarkupLine("  [bold]user access[/] <id|email|name> [[--json]]             List a user's direct roles, team memberships, and team-granted roles");
     AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
     AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
     AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
@@ -2540,28 +2639,37 @@ static void HandleCommandBarEditCommand(string[] positionalArgs, string[] allArg
 
 // ──────────────────────────────────────────────────────────────
 // ribbonworkbench hide <entity> <button-id> — stage a ribbon hide
+// ribbonworkbench checkout <entity>         — stage a RibbonDiff override
 // ──────────────────────────────────────────────────────────────
 static void HandleRibbonWorkbenchCommand(string[] positionalArgs, string[] allArgs)
 {
-    // ribbonworkbench hide <entity> <button-id>
     if (positionalArgs.Length < 2)
     {
         AnsiConsole.MarkupLine("[red]Usage:[/]");
         AnsiConsole.MarkupLine("  MetadataSync [bold]ribbonworkbench hide[/] <entity> <button-id>");
+        AnsiConsole.MarkupLine("  MetadataSync [bold]ribbonworkbench checkout[/] <entity>");
         AnsiConsole.MarkupLine("");
-        AnsiConsole.MarkupLine("[grey]Stages a HideCustomAction for the given ribbon button.[/]");
+        AnsiConsole.MarkupLine("[grey]hide     — stages a HideCustomAction for a ribbon button.[/]");
+        AnsiConsole.MarkupLine("[grey]checkout — copies entity RibbonDiff.xml to _pending/ for CommandDefinition override.[/]");
         AnsiConsole.MarkupLine("[grey]Use the Ribbon/ export folder to discover button IDs.[/]");
         Environment.Exit(1);
     }
 
     var subCommand = positionalArgs[1].ToLowerInvariant();
-    if (subCommand != "hide")
+    if (subCommand != "hide" && subCommand != "checkout")
     {
         AnsiConsole.MarkupLine($"[red]Unknown ribbonworkbench subcommand:[/] {subCommand}");
-        AnsiConsole.MarkupLine("[grey]Available: hide[/]");
+        AnsiConsole.MarkupLine("[grey]Available: hide, checkout[/]");
         Environment.Exit(1);
     }
 
+    if (subCommand == "checkout")
+    {
+        HandleRibbonWorkbenchCheckout(positionalArgs);
+        return;
+    }
+
+    // ── hide ──────────────────────────────────────────────────
     if (positionalArgs.Length < 4)
     {
         AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync ribbonworkbench hide <entity> <button-id>");
@@ -2631,6 +2739,80 @@ static void HandleRibbonWorkbenchCommand(string[] positionalArgs, string[] allAr
     AnsiConsole.MarkupLine($"  File:     {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// ribbonworkbench checkout <entity>
+// Copies entity's RibbonDiff.xml to _pending/RibbonWorkbench/<entity>_override.xml
+// and writes a companion JSON marker for the commit pipeline.
+// ──────────────────────────────────────────────────────────────
+static void HandleRibbonWorkbenchCheckout(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync ribbonworkbench checkout <entity>");
+        AnsiConsole.MarkupLine("[grey]Example: ribbonworkbench checkout opportunity[/]");
+        Environment.Exit(1);
+    }
+
+    var entityLogicalName = positionalArgs[2].ToLowerInvariant();
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "RibbonWorkbench");
+    Directory.CreateDirectory(pendingDir);
+
+    var xmlDest = Path.Combine(pendingDir, $"{entityLogicalName}_override.xml");
+    var jsonDest = Path.Combine(pendingDir, $"{entityLogicalName}_override.json");
+
+    if (File.Exists(jsonDest))
+    {
+        AnsiConsole.MarkupLine($"[yellow]Override already staged:[/] {jsonDest}");
+        AnsiConsole.MarkupLine("[grey]Edit the .xml file and run commit.[/]");
+        return;
+    }
+
+    // Copy existing RibbonDiff.xml from SolutionExport, or create an empty one
+    string xmlContent;
+    try
+    {
+        var solutionFolder = GetSolutionFolder(solutionExportDir);
+        var entityFolderName = FindEntityFolderName(solutionExportDir, entityLogicalName);
+        var ribbonDiffPath = Path.Combine(solutionFolder, "Entities", entityFolderName, "RibbonDiff.xml");
+        if (File.Exists(ribbonDiffPath))
+        {
+            xmlContent = File.ReadAllText(ribbonDiffPath);
+            AnsiConsole.MarkupLine($"[grey]Copied from:[/] {ribbonDiffPath}");
+        }
+        else
+        {
+            xmlContent = XrmEmulator.MetadataSync.Writers.RibbonImportWriter.CreateEmptyRibbonDiffXml().ToString();
+            AnsiConsole.MarkupLine("[grey]No existing RibbonDiff.xml found — created empty template.[/]");
+        }
+    }
+    catch
+    {
+        xmlContent = XrmEmulator.MetadataSync.Writers.RibbonImportWriter.CreateEmptyRibbonDiffXml().ToString();
+        AnsiConsole.MarkupLine("[grey]Solution folder not found — created empty RibbonDiff template.[/]");
+    }
+
+    File.WriteAllText(xmlDest, xmlContent);
+
+    var action = new RibbonWorkbenchAction
+    {
+        Action = "override",
+        EntityLogicalName = entityLogicalName
+    };
+    File.WriteAllText(jsonDest, JsonSerializer.Serialize(action, new JsonSerializerOptions { WriteIndented = true }));
+
+    AnsiConsole.MarkupLine($"[green]Checked out RibbonDiff for override:[/]");
+    AnsiConsole.MarkupLine($"  Entity:   {entityLogicalName}");
+    AnsiConsole.MarkupLine($"  XML:      {xmlDest}");
+    AnsiConsole.MarkupLine($"  Marker:   {jsonDest}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the XML file with your CommandDefinition overrides, then run [blue]commit[/].[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2874,6 +3056,108 @@ static void HandleEntityAttributeAddCommand(string[] positionalArgs, string[] al
     AnsiConsole.MarkupLine($"  File:        {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// entity statusvalue add <entity> <label> --state <int> [--value <int>] [--description <text>]
+// ──────────────────────────────────────────────────────────────
+static void HandleEntityStatusValueAddCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 5 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync entity statusvalue add <entity> <label> --state <int> [[--value <int>]] [[--description <text>]]");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Adds a statuscode value to an existing entity. Merges with existing pending file if present.[/]");
+        AnsiConsole.MarkupLine("[grey]--state is the statecode (0=Open/Active, 1=Won/Completed, 2=Lost/Disqualified — entity-specific).[/]");
+        AnsiConsole.MarkupLine("[grey]--value is optional; CRM auto-assigns if omitted (custom values typically start at 100000001).[/]");
+        AnsiConsole.MarkupLine("[grey]Example: entity statusvalue add opportunity \"Tilbud udløbet\" --state 2 --value 100000001[/]");
+        Environment.Exit(positionalArgs.Length < 5 ? 1 : 0);
+        return;
+    }
+
+    var entityLogicalName = positionalArgs[3].ToLowerInvariant();
+    var label = positionalArgs[4];
+
+    var stateArg = ParseNamedArg(allArgs, "--state");
+    if (stateArg == null || !int.TryParse(stateArg, out var stateCode))
+    {
+        AnsiConsole.MarkupLine("[red]--state <int> is required[/] (e.g. --state 2 for Lost on opportunity)");
+        Environment.Exit(1);
+        return;
+    }
+
+    int? value = null;
+    var valueArg = ParseNamedArg(allArgs, "--value");
+    if (valueArg != null && int.TryParse(valueArg, out var parsedValue))
+        value = parsedValue;
+
+    var description = ParseNamedArg(allArgs, "--description");
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "StatusValues");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{entityLogicalName}.statusvalue.json");
+
+    StatusValueDefinition? existing = null;
+    if (File.Exists(destPath))
+    {
+        try
+        {
+            existing = JsonSerializer.Deserialize<StatusValueDefinition>(
+                File.ReadAllText(destPath),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
+        }
+        catch { /* ignore parse errors, start fresh */ }
+    }
+
+    var addList = existing?.AddStatusCodes?.ToList() ?? new List<NewStatusValue>();
+
+    var duplicate = addList.FirstOrDefault(v =>
+        v.Label.Equals(label, StringComparison.OrdinalIgnoreCase)
+        || (value.HasValue && v.Value == value));
+    if (duplicate != null)
+    {
+        AnsiConsole.MarkupLine($"[yellow]Already pending:[/] '{duplicate.Label}' = {(duplicate.Value?.ToString() ?? "(auto)")}");
+        return;
+    }
+
+    addList.Add(new NewStatusValue
+    {
+        Label = label,
+        StateCode = stateCode,
+        Value = value,
+        Description = description,
+    });
+
+    var definition = new StatusValueDefinition
+    {
+        EntityLogicalName = entityLogicalName,
+        SolutionUniqueName = metadata.Solution.UniqueName,
+        AddStatusCodes = addList,
+        RenameStatusCodes = existing?.RenameStatusCodes,
+    };
+
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Status value added to pending file:[/]");
+    AnsiConsole.MarkupLine($"  Entity:   {entityLogicalName}");
+    AnsiConsole.MarkupLine($"  Label:    {label}");
+    AnsiConsole.MarkupLine($"  State:    {stateCode}");
+    AnsiConsole.MarkupLine($"  Value:    {(value.HasValue ? value.Value.ToString() : "(auto-assign)")}");
+    AnsiConsole.MarkupLine($"  Solution: {metadata.Solution.UniqueName}");
+    AnsiConsole.MarkupLine($"  File:     {destPath}");
+    AnsiConsole.MarkupLine($"  Total:    {addList.Count} status value(s) pending");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]Run [blue]commit[/] to apply, or add more values first.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -3197,22 +3481,11 @@ static void HandleSlaCreateKpiCommand(string[] positionalArgs, string[] allArgs)
 // ──────────────────────────────────────────────────────────────
 static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] allArgs)
 {
-    var componentType = ParseNamedArg(allArgs, "--type");
-    var entityLogicalName = ParseNamedArg(allArgs, "--entity");
-    var attributeLogicalName = ParseNamedArg(allArgs, "--attribute");
+    var componentType = ParseNamedArg(allArgs, "--type")?.ToLowerInvariant();
 
-    if (string.IsNullOrEmpty(componentType) || string.IsNullOrEmpty(entityLogicalName) || string.IsNullOrEmpty(attributeLogicalName))
+    if (string.IsNullOrEmpty(componentType))
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync solution add-component --type attribute --entity <entity> --attribute <attribute>");
-        AnsiConsole.MarkupLine("");
-        AnsiConsole.MarkupLine("[grey]Adds an existing attribute (created in another solution) to this solution.[/]");
-        AnsiConsole.MarkupLine("[grey]Example: solution add-component --type attribute --entity lead --attribute kf_existingcustomer[/]");
-        Environment.Exit(1);
-    }
-
-    if (!componentType.Equals("attribute", StringComparison.OrdinalIgnoreCase))
-    {
-        AnsiConsole.MarkupLine($"[red]Unsupported component type: {componentType}. Currently only 'attribute' is supported.[/]");
+        PrintSolutionAddComponentUsage();
         Environment.Exit(1);
     }
 
@@ -3220,26 +3493,68 @@ static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] 
     var baseDir = GetBaseDir(metadataPath);
     var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
 
-    // Read solution unique name
     var solutionFolder = GetSolutionFolder(solutionExportDir);
     var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
     var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
     var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
         ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
 
-    var definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+    XrmEmulator.MetadataSync.Models.SolutionComponentDefinition definition;
+    string fileName;
+    string displayLine;
+
+    if (componentType == "attribute")
     {
-        EntityLogicalName = entityLogicalName.ToLowerInvariant(),
-        AttributeLogicalName = attributeLogicalName.ToLowerInvariant(),
-        ComponentType = componentType.ToLowerInvariant(),
-        DisplayName = attributeLogicalName,
-        SolutionUniqueName = solutionUniqueName
-    };
+        var entityLogicalName = ParseNamedArg(allArgs, "--entity");
+        var attributeLogicalName = ParseNamedArg(allArgs, "--attribute");
+        if (string.IsNullOrEmpty(entityLogicalName) || string.IsNullOrEmpty(attributeLogicalName))
+        {
+            PrintSolutionAddComponentUsage();
+            Environment.Exit(1);
+        }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = entityLogicalName!.ToLowerInvariant(),
+            AttributeLogicalName = attributeLogicalName!.ToLowerInvariant(),
+            ComponentType = componentType,
+            DisplayName = attributeLogicalName,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"{entityLogicalName}_{attributeLogicalName}.solutioncomponent.json";
+        displayLine = $"  Entity:     {entityLogicalName}\n  Attribute:  {attributeLogicalName}";
+    }
+    else if (componentType == "form")
+    {
+        var formIdRaw = ParseNamedArg(allArgs, "--form");
+        if (string.IsNullOrEmpty(formIdRaw) || !Guid.TryParse(formIdRaw.Trim('{', '}'), out var formId))
+        {
+            PrintSolutionAddComponentUsage();
+            Environment.Exit(1);
+            return;
+        }
+        var formIdStr = formId.ToString().ToLowerInvariant();
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = "systemform",
+            AttributeLogicalName = formIdStr,
+            ComponentType = componentType,
+            DisplayName = $"Form {formIdStr}",
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"form_{formIdStr}.solutioncomponent.json";
+        displayLine = $"  Form GUID:  {formIdStr}";
+    }
+    else
+    {
+        AnsiConsole.MarkupLine($"[red]Unsupported solution component type: {componentType}.[/] Supported: attribute, form.");
+        Environment.Exit(1);
+        return;
+    }
 
     var pendingDir = Path.Combine(solutionExportDir, "_pending", "SolutionComponents");
     Directory.CreateDirectory(pendingDir);
 
-    var destPath = Path.Combine(pendingDir, $"{entityLogicalName}_{attributeLogicalName}.solutioncomponent.json");
+    var destPath = Path.Combine(pendingDir, fileName);
     File.WriteAllText(destPath, System.Text.Json.JsonSerializer.Serialize(definition, new System.Text.Json.JsonSerializerOptions
     {
         WriteIndented = true,
@@ -3248,12 +3563,23 @@ static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] 
 
     AnsiConsole.MarkupLine($"[green]Staged solution component:[/]");
     AnsiConsole.MarkupLine($"  Type:       {componentType}");
-    AnsiConsole.MarkupLine($"  Entity:     {entityLogicalName}");
-    AnsiConsole.MarkupLine($"  Attribute:  {attributeLogicalName}");
+    AnsiConsole.MarkupLine(displayLine);
     AnsiConsole.MarkupLine($"  Solution:   {solutionUniqueName}");
     AnsiConsole.MarkupLine($"  File:       {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to add to solution.[/]");
+}
+
+static void PrintSolutionAddComponentUsage()
+{
+    AnsiConsole.MarkupLine("[red]Usage:[/]");
+    AnsiConsole.MarkupLine("  solution add-component --type attribute --entity <entity> --attribute <attr>");
+    AnsiConsole.MarkupLine("  solution add-component --type form      --form <form-guid>");
+    AnsiConsole.MarkupLine("");
+    AnsiConsole.MarkupLine("[grey]Adds an existing component (created in another solution) to this solution.[/]");
+    AnsiConsole.MarkupLine("[grey]Examples:[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type attribute --entity lead --attribute kf_existingcustomer[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type form --form 6e77626b-e693-44f0-a1c7-359b1a7a9a4c[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -3410,6 +3736,264 @@ static List<string> ParseAllNamedArgs(string[] args, string name)
     }
     return values;
 }
+
+// ──────────────────────────────────────────────────────────────
+// user access <identifier> — list direct roles, team memberships,
+// and team-granted roles for a systemuser
+// ──────────────────────────────────────────────────────────────
+static async Task HandleUserCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 2 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        PrintUserUsage();
+        Environment.Exit(positionalArgs.Length < 2 ? 1 : 0);
+    }
+
+    if (positionalArgs[1].Equals("access", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleUserAccessCommand(positionalArgs, allArgs, configuration, noCache);
+        return;
+    }
+
+    AnsiConsole.MarkupLine($"[red]Unknown user subcommand:[/] {positionalArgs[1]}");
+    PrintUserUsage();
+    Environment.Exit(1);
+}
+
+static void PrintUserUsage()
+{
+    AnsiConsole.MarkupLine("[bold]MetadataSync user[/] — inspect systemuser access");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Commands:[/]");
+    AnsiConsole.MarkupLine("  user access <identifier> [[--json]]    List a user's direct roles, team memberships, and team-granted roles");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Arguments:[/]");
+    AnsiConsole.MarkupLine("  <identifier>   systemuser GUID, email (internalemailaddress or domainname/UPN), or fullname (\"Last, First\")");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Options:[/]");
+    AnsiConsole.MarkupLine("  --json         Emit a single JSON object instead of tables");
+    AnsiConsole.MarkupLine("  --help, -h     Show this help");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Examples:[/]");
+    AnsiConsole.MarkupLine("  [grey]user access pkn@kfforsikring.dk[/]");
+    AnsiConsole.MarkupLine("  [grey]user access \"Knudsen, Pia\"[/]");
+    AnsiConsole.MarkupLine("  [grey]user access 935af912-6412-f111-8407-7ced8d2f096e --json[/]");
+}
+
+static async Task HandleUserAccessCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        PrintUserUsage();
+        Environment.Exit(1);
+    }
+
+    var identifier = positionalArgs[2];
+    var asJson = HasFlag(allArgs, "--json");
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+
+    if (!asJson) AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    if (!asJson) AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    // ── 1. Resolve user ────────────────────────────────────────
+    var userQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("systemuser")
+    {
+        ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet(
+            "systemuserid", "fullname", "domainname", "internalemailaddress",
+            "isdisabled", "businessunitid", "yomifullname"),
+        TopCount = 25
+    };
+    if (Guid.TryParse(identifier, out var userGuid))
+    {
+        userQuery.Criteria.Conditions.Add(
+            new Microsoft.Xrm.Sdk.Query.ConditionExpression(
+                "systemuserid", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, userGuid));
+    }
+    else
+    {
+        var or = new Microsoft.Xrm.Sdk.Query.FilterExpression(Microsoft.Xrm.Sdk.Query.LogicalOperator.Or);
+        or.Conditions.Add(new Microsoft.Xrm.Sdk.Query.ConditionExpression("internalemailaddress", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, identifier));
+        or.Conditions.Add(new Microsoft.Xrm.Sdk.Query.ConditionExpression("domainname", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, identifier));
+        or.Conditions.Add(new Microsoft.Xrm.Sdk.Query.ConditionExpression("fullname", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, identifier));
+        or.Conditions.Add(new Microsoft.Xrm.Sdk.Query.ConditionExpression("yomifullname", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, identifier));
+        userQuery.Criteria.Filters.Add(or);
+    }
+
+    var userResults = client.RetrieveMultiple(userQuery);
+    if (userResults.Entities.Count == 0)
+    {
+        AnsiConsole.MarkupLine($"[red]No user matched:[/] {Markup.Escape(identifier)}");
+        Environment.Exit(1);
+    }
+    if (userResults.Entities.Count > 1)
+    {
+        AnsiConsole.MarkupLine($"[red]Ambiguous — {userResults.Entities.Count} users matched:[/] {Markup.Escape(identifier)}");
+        foreach (var e in userResults.Entities)
+        {
+            var label = e.GetAttributeValue<string>("internalemailaddress")
+                     ?? e.GetAttributeValue<string>("domainname")
+                     ?? "";
+            AnsiConsole.MarkupLine($"  {e.Id} — {Markup.Escape(e.GetAttributeValue<string>("fullname") ?? "")} ({Markup.Escape(label)})");
+        }
+        AnsiConsole.MarkupLine("[yellow]Re-run with a more specific identifier (use the GUID shown above).[/]");
+        Environment.Exit(1);
+    }
+
+    var user = userResults.Entities[0];
+    var userId = user.Id;
+
+    // ── 2. Direct roles (via systemuserroles) ───────────────────
+    var directRolesFetch = $@"<fetch><entity name='role'>
+        <attribute name='roleid'/><attribute name='name'/><attribute name='businessunitid'/>
+        <link-entity name='systemuserroles' from='roleid' to='roleid' intersect='true'>
+            <filter><condition attribute='systemuserid' operator='eq' value='{userId}'/></filter>
+        </link-entity>
+        <order attribute='name'/>
+    </entity></fetch>";
+    var directRoles = client.RetrieveMultiple(new Microsoft.Xrm.Sdk.Query.FetchExpression(directRolesFetch)).Entities;
+
+    // ── 3. Team memberships ─────────────────────────────────────
+    var teamsFetch = $@"<fetch><entity name='team'>
+        <attribute name='teamid'/><attribute name='name'/><attribute name='teamtype'/><attribute name='businessunitid'/>
+        <link-entity name='teammembership' from='teamid' to='teamid' intersect='true'>
+            <filter><condition attribute='systemuserid' operator='eq' value='{userId}'/></filter>
+        </link-entity>
+        <order attribute='name'/>
+    </entity></fetch>";
+    var teams = client.RetrieveMultiple(new Microsoft.Xrm.Sdk.Query.FetchExpression(teamsFetch)).Entities;
+
+    // ── 4. Roles granted via teams ──────────────────────────────
+    var teamRoles = new List<Microsoft.Xrm.Sdk.Entity>();
+    if (teams.Count > 0)
+    {
+        var teamIdValues = string.Join("", teams.Select(t => $"<value>{t.Id}</value>"));
+        var teamRolesFetch = $@"<fetch><entity name='role'>
+            <attribute name='roleid'/><attribute name='name'/><attribute name='businessunitid'/>
+            <link-entity name='teamroles' from='roleid' to='roleid' intersect='true' alias='tr'>
+                <attribute name='teamid'/>
+                <link-entity name='team' from='teamid' to='teamid' alias='t'>
+                    <attribute name='name'/>
+                    <filter><condition attribute='teamid' operator='in'>{teamIdValues}</condition></filter>
+                </link-entity>
+            </link-entity>
+            <order attribute='name'/>
+        </entity></fetch>";
+        teamRoles = client.RetrieveMultiple(new Microsoft.Xrm.Sdk.Query.FetchExpression(teamRolesFetch)).Entities.ToList();
+    }
+
+    // ── Output ──────────────────────────────────────────────────
+    if (asJson)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["user"] = UserAccessNormalize(user),
+            ["directRoles"] = directRoles.Select(UserAccessNormalize).ToList(),
+            ["teams"] = teams.Select(t =>
+            {
+                var d = UserAccessNormalize(t);
+                d["teamtypeLabel"] = DecodeTeamType(t.GetAttributeValue<OptionSetValue>("teamtype")?.Value);
+                return d;
+            }).ToList(),
+            ["teamRoles"] = teamRoles.Select(UserAccessNormalize).ToList()
+        };
+        Console.WriteLine(JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+        return;
+    }
+
+    var userBu = user.GetAttributeValue<EntityReference>("businessunitid");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]User[/]");
+    var uTable = new Table().AddColumn("Field").AddColumn("Value");
+    uTable.AddRow("id", userId.ToString());
+    uTable.AddRow("fullname", Markup.Escape(user.GetAttributeValue<string>("fullname") ?? ""));
+    uTable.AddRow("domainname", Markup.Escape(user.GetAttributeValue<string>("domainname") ?? ""));
+    uTable.AddRow("email", Markup.Escape(user.GetAttributeValue<string>("internalemailaddress") ?? ""));
+    uTable.AddRow("enabled", user.GetAttributeValue<bool>("isdisabled") ? "false" : "true");
+    uTable.AddRow("business unit", userBu != null ? Markup.Escape($"{userBu.Name} ({userBu.Id})") : "");
+    AnsiConsole.Write(uTable);
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[bold]Direct roles ({directRoles.Count})[/]");
+    if (directRoles.Count == 0) AnsiConsole.MarkupLine("[grey](none)[/]");
+    else
+    {
+        var rt = new Table().AddColumn("Role").AddColumn("BU");
+        foreach (var r in directRoles)
+        {
+            var bu = r.GetAttributeValue<EntityReference>("businessunitid");
+            rt.AddRow(Markup.Escape(r.GetAttributeValue<string>("name") ?? ""), Markup.Escape(bu?.Name ?? ""));
+        }
+        AnsiConsole.Write(rt);
+    }
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[bold]Teams ({teams.Count})[/]");
+    if (teams.Count == 0) AnsiConsole.MarkupLine("[grey](none)[/]");
+    else
+    {
+        var tt = new Table().AddColumn("Team").AddColumn("Type").AddColumn("BU");
+        foreach (var team in teams)
+        {
+            var bu = team.GetAttributeValue<EntityReference>("businessunitid");
+            var typeVal = team.GetAttributeValue<OptionSetValue>("teamtype")?.Value;
+            tt.AddRow(
+                Markup.Escape(team.GetAttributeValue<string>("name") ?? ""),
+                DecodeTeamType(typeVal),
+                Markup.Escape(bu?.Name ?? ""));
+        }
+        AnsiConsole.Write(tt);
+    }
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[bold]Roles via teams ({teamRoles.Count})[/]");
+    if (teamRoles.Count == 0) AnsiConsole.MarkupLine("[grey](none)[/]");
+    else
+    {
+        var trt = new Table().AddColumn("Role").AddColumn("BU").AddColumn("Via team");
+        foreach (var r in teamRoles)
+        {
+            var bu = r.GetAttributeValue<EntityReference>("businessunitid");
+            var viaTeam = r.GetAttributeValue<AliasedValue>("t.name")?.Value?.ToString() ?? "";
+            trt.AddRow(
+                Markup.Escape(r.GetAttributeValue<string>("name") ?? ""),
+                Markup.Escape(bu?.Name ?? ""),
+                Markup.Escape(viaTeam));
+        }
+        AnsiConsole.Write(trt);
+    }
+}
+
+static Dictionary<string, object?> UserAccessNormalize(Microsoft.Xrm.Sdk.Entity entity)
+{
+    var row = new Dictionary<string, object?> { ["id"] = entity.Id.ToString() };
+    foreach (var kvp in entity.Attributes)
+    {
+        row[kvp.Key] = kvp.Value switch
+        {
+            EntityReference er => $"{er.LogicalName}:{er.Id} ({er.Name})",
+            OptionSetValue osv => osv.Value,
+            Money m => m.Value,
+            AliasedValue av => av.Value?.ToString(),
+            OptionSetValueCollection osc => string.Join(",", osc.Select(o => o.Value)),
+            _ => kvp.Value?.ToString()
+        };
+    }
+    return row;
+}
+
+static string DecodeTeamType(int? value) => value switch
+{
+    0 => "Owner",
+    1 => "Access",
+    2 => "AAD SecurityGroup",
+    3 => "AAD OfficeGroup",
+    null => "",
+    _ => $"Unknown({value})"
+};
 
 // ──────────────────────────────────────────────────────────────
 // security-role update|add — manage security role privileges
@@ -5148,8 +5732,25 @@ static void HandleIconNewCommand(string[] positionalArgs, string[] allArgs)
 
     var metadataPath = FindConnectionMetadata();
     var baseDir = GetBaseDir(metadataPath);
-    var pendingIconsDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Icons");
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingIconsDir = Path.Combine(solutionExportDir, "_pending", "Icons");
     Directory.CreateDirectory(pendingIconsDir);
+
+    // Virtual entities reject IconVectorName updates — upload the SVG but
+    // drop the --entity binding so commit doesn't fail.
+    var skippedEntityAssignment = false;
+    if (entityLogicalName != null)
+    {
+        var entityFolderName = FindEntityFolderName(solutionExportDir, entityLogicalName.ToLowerInvariant());
+        var entityXmlPath = FindEntityXmlInSnapshot(solutionExportDir, entityFolderName);
+        if (entityXmlPath != null && IsVirtualEntity(entityXmlPath))
+        {
+            AnsiConsole.MarkupLine($"[yellow]Warning:[/] [bold]{entityLogicalName}[/] is a virtual entity — IconVectorName cannot be set.");
+            AnsiConsole.MarkupLine($"[grey]The SVG will still upload; skipping entity assignment.[/]");
+            entityLogicalName = null;
+            skippedEntityAssignment = true;
+        }
+    }
 
     // Replace slashes with dashes for safe file names
     var safeName = webResourceName.Replace("/", "-").Replace("\\", "-");
@@ -5180,6 +5781,8 @@ static void HandleIconNewCommand(string[] positionalArgs, string[] allArgs)
     AnsiConsole.MarkupLine($"  Marker: {jsonPath}");
     if (entityLogicalName != null)
         AnsiConsole.MarkupLine($"  Entity: {entityLogicalName} → IconVectorName = {webResourceName}");
+    else if (skippedEntityAssignment)
+        AnsiConsole.MarkupLine($"  Entity: [yellow](skipped — virtual entity)[/]");
     AnsiConsole.MarkupLine($"[grey]Run [blue]commit[/] to upload to CRM.[/]");
 }
 
@@ -5196,8 +5799,21 @@ static void HandleIconSetCommand(string[] positionalArgs)
 
     var metadataPath = FindConnectionMetadata();
     var baseDir = GetBaseDir(metadataPath);
-    var pendingIconsDir = Path.Combine(baseDir, "SolutionExport", "_pending", "Icons");
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingIconsDir = Path.Combine(solutionExportDir, "_pending", "Icons");
     Directory.CreateDirectory(pendingIconsDir);
+
+    // Virtual entities reject IconVectorName updates — bail before staging
+    // anything so commit doesn't fail later.
+    var entityFolderName = FindEntityFolderName(solutionExportDir, entityLogicalName.ToLowerInvariant());
+    var entityXmlPath = FindEntityXmlInSnapshot(solutionExportDir, entityFolderName);
+    if (entityXmlPath != null && IsVirtualEntity(entityXmlPath))
+    {
+        AnsiConsole.MarkupLine($"[red]Aborted:[/] [bold]{entityLogicalName}[/] is a virtual entity — IconVectorName cannot be set.");
+        AnsiConsole.MarkupLine($"[grey]Virtual entities only support SVG web resource uploads (icon new without --entity).[/]");
+        Environment.Exit(1);
+        return;
+    }
 
     var definition = new IconSetDefinition
     {
@@ -5361,7 +5977,27 @@ static void HandlePendingCommand()
         .Where(f => f.Contains("appactions", StringComparison.OrdinalIgnoreCase))
         .ToList();
 
+    var pendingStatusValueFiles = Directory.GetFiles(pendingDir, "*.statusvalue.json", SearchOption.AllDirectories)
+        .ToList();
+
     var items = new List<(string Type, string Label, string File)>();
+
+    foreach (var f in pendingStatusValueFiles)
+    {
+        try
+        {
+            var def = JsonSerializer.Deserialize<StatusValueDefinition>(
+                File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
+            var addCount = def?.AddStatusCodes?.Count ?? 0;
+            var renameCount = def?.RenameStatusCodes?.Count ?? 0;
+            items.Add(("Status Value", $"{def?.EntityLogicalName} ({addCount} add, {renameCount} rename)", Path.GetRelativePath(pendingDir, f)));
+        }
+        catch
+        {
+            items.Add(("Status Value", Path.GetFileNameWithoutExtension(f), Path.GetRelativePath(pendingDir, f)));
+        }
+    }
 
     foreach (var f in pendingViewFiles)
     {
@@ -5772,6 +6408,13 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         var errorMessage = ExtractErrorDetail(result.FailedException!);
         foreach (var line in errorMessage.Split('\n'))
             AnsiConsole.MarkupLine($"[red]  {Markup.Escape(line)}[/]");
+        if (debug)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[grey]-- full exception (--debug) --[/]");
+            foreach (var line in result.FailedException!.ToString().Split('\n'))
+                AnsiConsole.MarkupLine($"[grey]{Markup.Escape(line)}[/]");
+        }
         if (result.Committed.Count > 0)
         {
             AnsiConsole.MarkupLine($"[yellow]{result.Committed.Count} item(s) committed successfully before the error.[/]");
@@ -6819,23 +7462,34 @@ static string ExtractErrorDetail(Exception ex)
         return msg;
     }
 
+    // Walk the entire exception chain for HTTP response body (plugin errors, validation failures).
+    // This must run before the InvalidOperationException early-return — our own wrappers in
+    // DataImportWriter chain the original HttpOperationException as InnerException, which is
+    // where the actual Dataverse OData error message lives.
+    var httpContent = WalkExceptionChainForHttpContent(ex);
+    if (httpContent != null)
+        return $"{ex.Message}\n  Server response: {httpContent}";
+
     // InvalidOperationException (our own wrappers, e.g. Delete handler)
     if (ex is InvalidOperationException)
         return ex.Message;
-
-    // For Dataverse WebAPI errors (HttpOperationException etc.),
-    // try to extract the response body via reflection since
-    // Microsoft.Rest types aren't directly referenced.
-    var detail = TryExtractHttpResponseContent(ex)
-        ?? TryExtractHttpResponseContent(ex.InnerException);
-    if (detail != null)
-        return $"{ex.Message}\n  Server response: {detail}";
 
     // Fallback: unwrap to innermost
     var inner = ex;
     while (inner.InnerException != null)
         inner = inner.InnerException;
     return inner == ex ? ex.Message : $"{ex.Message}\n  Detail: {inner.Message}";
+}
+
+static string? WalkExceptionChainForHttpContent(Exception? ex)
+{
+    while (ex != null)
+    {
+        var content = TryExtractHttpResponseContent(ex);
+        if (content != null) return content;
+        ex = ex.InnerException;
+    }
+    return null;
 }
 
 static string? TryExtractHttpResponseContent(Exception? ex)

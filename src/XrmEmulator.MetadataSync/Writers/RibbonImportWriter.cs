@@ -51,6 +51,43 @@ public static class RibbonImportWriter
     }
 
     /// <summary>
+    /// Imports a full RibbonDiffXml override for an entity.
+    /// The caller provides the complete RibbonDiffXml document — all existing customizations
+    /// in that document are replaced with the supplied content.
+    /// </summary>
+    public static void ImportOverride(
+        IOrganizationService service,
+        string solutionUniqueName,
+        string entityLogicalName,
+        string entityDisplayName,
+        XDocument ribbonDiffDoc,
+        string solutionXmlContent)
+    {
+        var solutionXml = BuildMinimalSolutionXml(solutionXmlContent, entityLogicalName);
+        var customizationsXml = BuildCustomizationsXml(entityDisplayName, ribbonDiffDoc);
+        var contentTypesXml = BuildContentTypesXml();
+
+        using var memoryStream = new MemoryStream();
+        using (var zip = new ZipArchive(memoryStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            AddZipEntry(zip, "[Content_Types].xml", contentTypesXml);
+            AddZipEntry(zip, "solution.xml", solutionXml);
+            AddZipEntry(zip, "customizations.xml", customizationsXml);
+        }
+
+        memoryStream.Position = 0;
+        var zipBytes = memoryStream.ToArray();
+
+        var importRequest = new ImportSolutionRequest
+        {
+            CustomizationFile = zipBytes,
+            OverwriteUnmanagedCustomizations = true,
+            PublishWorkflows = false
+        };
+        service.Execute(importRequest);
+    }
+
+    /// <summary>
     /// Retrieve the entity's RibbonDiffXml from CRM and search for buttons matching a pattern.
     /// </summary>
     public static string? RetrieveEntityRibbonXml(IOrganizationService service, string entityLogicalName)
@@ -193,7 +230,7 @@ public static class RibbonImportWriter
         return doc.ToString();
     }
 
-    internal static XDocument CreateEmptyRibbonDiffXml()
+    public static XDocument CreateEmptyRibbonDiffXml()
     {
         return new XDocument(
             new XElement("RibbonDiffXml",

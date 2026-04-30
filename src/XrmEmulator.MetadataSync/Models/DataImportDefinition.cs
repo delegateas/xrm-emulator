@@ -9,7 +9,12 @@ public record DataImportDefinition
 
     /// <summary>
     /// Optional field type overrides for ambiguous types.
-    /// Values: "int", "optionset", "decimal", "money", "string", "bool", "lookup", "multiselect"
+    /// Simple types: "int", "optionset", "decimal", "money", "string", "bool", "multiselect"
+    /// Lookup (raw GUID): "lookup" — value must be "entityname:guid"
+    /// Lookup (by name):  "lookup:tablename:fieldname" — value is the match-field value;
+    ///   the CLI resolves it to an EntityReference by querying CRM. Results are cached
+    ///   per import file, so repeated references to the same parent are free.
+    ///   Example: "parentaccountid": "lookup:account:name" with value "Acme Corp"
     /// Numbers default to "optionset" if not specified (most common in CRM custom entities).
     /// </summary>
     public Dictionary<string, string>? FieldTypes { get; init; }

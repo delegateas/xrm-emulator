@@ -387,6 +387,44 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Environment variables (definition + current value upsert)
+        var pendingEnvVarFiles = Directory.GetFiles(pendingDir, "*.envvar.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingEnvVarFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<EnvironmentVariableFileDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            foreach (var entry in parsed.Variables)
+            {
+                var defaultDisplay = string.IsNullOrEmpty(entry.DefaultValue) ? "(empty)" : $"\"{entry.DefaultValue}\"";
+                var valueDisplay = entry.CurrentValue == null
+                    ? "(none)"
+                    : entry.Type.Equals("Secret", StringComparison.OrdinalIgnoreCase)
+                        ? "[secret]"
+                        : $"\"{entry.CurrentValue}\"";
+                var label = $"Environment Variable: {entry.SchemaName}"
+                    + $" | Type: {entry.Type}"
+                    + $" | Default: {defaultDisplay}"
+                    + $" | Value: {valueDisplay}";
+                commitItems.Add(new CommitItem(CommitItemType.EnvironmentVariable, label, f,
+                    new EnvironmentVariableSingleItem(parsed.SolutionUniqueName, entry)));
+            }
+        }
+
+        // AppModule role maps (role ↔ appmodule associations)
+        var pendingAppModuleRoleFiles = Directory.GetFiles(pendingDir, "*.appmodulerole.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingAppModuleRoleFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<AppModuleRoleDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.AppModuleRole,
+                $"App Role Map: {parsed.RoleName} → {parsed.AppModuleUniqueName}",
+                f, parsed));
+        }
+
         // Workflow activations (activate existing draft BPFs / business rules + add backing entity to solution)
         var pendingWorkflowActivationFiles = Directory.GetFiles(pendingDir, "*.workflowactivation.json", SearchOption.AllDirectories)
             .ToList();
@@ -590,6 +628,7 @@ public static class CommitPipeline
             [CommitItemType.NewManyToManyRelationship] = 2, // After entities exist, before views/forms reference them
             [CommitItemType.SecurityRoleUpdate] = 3,
             [CommitItemType.SecurityRoleAssignment] = 17,
+            [CommitItemType.AppModuleRole] = 13, // After role creation (SecurityRoleUpdate=3) and after AppModule entity/view/form edits (10-12)
             [CommitItemType.WorkflowActivation] = 8, // After BusinessRule, before AppModule components
             [CommitItemType.WorkflowRemoveFromSolution] = 8,
             [CommitItemType.WebResourceUpload] = 3,
@@ -618,6 +657,7 @@ public static class CommitPipeline
             [CommitItemType.EntityMetadataDelete] = 21, // Last — all references must be gone
             [CommitItemType.RibbonWorkbench] = 22,
             [CommitItemType.EnableChangeTracking] = 2,
+            [CommitItemType.EnvironmentVariable] = 20, // After entities/attributes are in place
         };
         commitItems.Sort((a, b) =>
         {
@@ -829,8 +869,9 @@ public static class CommitPipeline
                         if (def.EntityLogicalName != null)
                         {
                             log?.Invoke($"  Setting IconVectorName on {def.EntityLogicalName}");
-                            IconWriter.SetEntityIcon(client, def.EntityLogicalName, def.WebResourceName);
-                            log?.Invoke($"  Entity icon set OK.");
+                            var applied = IconWriter.SetEntityIcon(client, def.EntityLogicalName, def.WebResourceName, log);
+                            if (applied)
+                                log?.Invoke($"  Entity icon set OK.");
                         }
                         break;
                     }
@@ -839,8 +880,9 @@ public static class CommitPipeline
                     {
                         var def = (IconSetDefinition)item.ParsedData;
                         log?.Invoke($"Setting IconVectorName on {def.EntityLogicalName} → {def.IconVectorName}");
-                        IconWriter.SetEntityIcon(client, def.EntityLogicalName, def.IconVectorName);
-                        log?.Invoke($"  Entity icon set OK.");
+                        var applied = IconWriter.SetEntityIcon(client, def.EntityLogicalName, def.IconVectorName, log);
+                        if (applied)
+                            log?.Invoke($"  Entity icon set OK.");
                         break;
                     }
 
@@ -1452,6 +1494,65 @@ public static class CommitPipeline
                             var attrId = (Guid)resp.Results["AttributeId"];
                             log?.Invoke($"  Customer lookup created OK. Attribute ID: {attrId}");
                         }
+                        else if (def.AttributeType.Equals("polymorphic", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Multi-table (polymorphic) lookup targeting arbitrary entity types.
+                            // Uses CreatePolymorphicLookupAttribute — not available as a typed SDK class,
+                            // so we fall back to an untyped OrganizationRequest, same pattern as customer.
+                            var targetEntities = def.TargetEntityLogicalNames
+                                ?? throw new InvalidOperationException("targetEntityLogicalNames is required for polymorphic lookup attributes");
+
+                            log?.Invoke($"Creating polymorphic lookup: {def.EntityLogicalName}.{def.AttributeLogicalName} → [{string.Join(", ", targetEntities)}]");
+
+                            var lookupAttr = new LookupAttributeMetadata
+                            {
+                                SchemaName = def.AttributeSchemaName,
+                                DisplayName = new Label(def.DisplayName, 1030),
+                                RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                                Description = string.IsNullOrEmpty(def.Description) ? new Label() : new Label(def.Description, 1030)
+                            };
+
+                            var cascade = new CascadeConfiguration
+                            {
+                                Assign = CascadeType.NoCascade,
+                                Delete = CascadeType.RemoveLink,
+                                Merge = CascadeType.NoCascade,
+                                Reparent = CascadeType.NoCascade,
+                                Share = CascadeType.NoCascade,
+                                Unshare = CascadeType.NoCascade
+                            };
+
+                            var prefix = def.AttributeSchemaName.Contains("_")
+                                ? def.AttributeSchemaName.Substring(0, def.AttributeSchemaName.IndexOf('_') + 1)
+                                : "";
+                            var baseName = def.AttributeSchemaName.Substring(prefix.Length);
+
+                            var relationships = targetEntities
+                                .Select(t => new OneToManyRelationshipMetadata
+                                {
+                                    SchemaName = def.RelationshipSchemaName != null
+                                        ? $"{def.RelationshipSchemaName}_{t}"
+                                        : $"{prefix}{def.EntityLogicalName}_{baseName}_{t}",
+                                    ReferencedEntity = t,
+                                    ReferencingEntity = def.EntityLogicalName,
+                                    CascadeConfiguration = cascade
+                                })
+                                .ToArray();
+
+                            // CreatePolymorphicLookupAttribute uses the same parameter shape as
+                            // CreateCustomerRelationships: "Lookup" is a single LookupAttributeMetadata
+                            // (not an array — the WCF serializer has no type mapping for LookupAttributeMetadata[]).
+                            var createReq = new OrganizationRequest("CreatePolymorphicLookupAttribute");
+                            createReq["Lookup"] = lookupAttr;
+                            createReq["OneToManyRelationships"] = relationships;
+                            createReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+
+                            var resp = client.Execute(createReq);
+                            var attrId = resp.Results.ContainsKey("AttributeId")
+                                ? (Guid)resp.Results["AttributeId"]
+                                : Guid.Empty;
+                            log?.Invoke($"  Polymorphic lookup created OK. Attribute ID: {attrId}");
+                        }
                         else if (def.AttributeType.Equals("lookup", StringComparison.OrdinalIgnoreCase))
                         {
                             var targetEntity = def.TargetEntityLogicalName
@@ -1668,6 +1769,18 @@ public static class CommitPipeline
                             client.Execute(addReq);
                             log?.Invoke($"  SLA added to solution {def.SolutionUniqueName}.");
                         }
+                        else if (def.ComponentType.Equals("form", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var addReq = new AddSolutionComponentRequest
+                            {
+                                ComponentType = 24, // SystemForm
+                                ComponentId = Guid.Parse(def.AttributeLogicalName), // Reusing field for the form GUID
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            };
+                            client.Execute(addReq);
+                            log?.Invoke($"  Form added to solution {def.SolutionUniqueName}. FormId: {def.AttributeLogicalName}");
+                        }
                         else
                         {
                             throw new InvalidOperationException($"Unsupported solution component type: {def.ComponentType}");
@@ -1873,6 +1986,14 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.AppModuleRole:
+                    {
+                        var def = (AppModuleRoleDefinition)item.ParsedData;
+                        log?.Invoke($"Adding role to app map: {def.RoleName} → {def.AppModuleUniqueName}");
+                        AppModuleWriter.AddRole(client, def.AppModuleUniqueName, def.RoleName, log);
+                        break;
+                    }
+
                     case CommitItemType.WorkflowActivation:
                     {
                         var def = (WorkflowActivationDefinition)item.ParsedData;
@@ -2010,17 +2131,31 @@ public static class CommitPipeline
                         var created = 0;
                         var updated = 0;
                         var rowIndex = 0;
+                        // Shared cache for lookup:tablename:fieldname resolutions within this file
+                        var lookupCache = new Dictionary<string, EntityReference>(StringComparer.Ordinal);
+                        // Keyed by matchOn value(s) → record GUID, written to _outputs.json after the loop
+                        var rowOutputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var row in def.Rows)
                         {
                             rowIndex++;
                             var rowLabel = string.Join(", ", def.MatchOn
                                 .Where(m => row.ContainsKey(m) && row[m]?.ValueKind != JsonValueKind.Null)
                                 .Select(m => $"{m}={row[m]}"));
+                            // Build a stable key from matchOn values — single field = the value itself,
+                            // compound = "val1|val2". Falls back to "row{n}" when matchOn value is absent.
+                            var matchKey = def.MatchOn.Count == 1
+                                ? (row.TryGetValue(def.MatchOn[0], out var mv) && mv?.ValueKind != JsonValueKind.Null
+                                    ? mv.Value.ToString()
+                                    : $"row{rowIndex}")
+                                : string.Join("|", def.MatchOn.Select(m =>
+                                    row.TryGetValue(m, out var v) && v?.ValueKind != JsonValueKind.Null
+                                        ? v.Value.ToString() : ""));
                             try
                             {
-                                var (id, wasCreated) = DataImportWriter.UpsertRow(client, def.Table, def.MatchOn, def.FieldTypes, row);
+                                var (id, wasCreated) = DataImportWriter.UpsertRow(client, def.Table, def.MatchOn, def.FieldTypes, row, lookupCache);
                                 if (wasCreated) created++; else updated++;
                                 log?.Invoke($"  {(wasCreated ? "Created" : "Updated")} {def.Table} {id} [{rowLabel}]");
+                                rowOutputs[matchKey] = id.ToString();
                             }
                             catch (Exception rowEx)
                             {
@@ -2029,6 +2164,7 @@ public static class CommitPipeline
                             }
                         }
                         log?.Invoke($"  Import complete: {created} created, {updated} updated.");
+                        resolvedOutputs[relativePath] = rowOutputs;
                         break;
                     }
 
@@ -2038,6 +2174,15 @@ public static class CommitPipeline
                         log?.Invoke($"Importing {def.Pairs.Count} N:N pair(s) for {def.Relationship}");
                         var result = AssociationsImportWriter.Apply(client, def, log);
                         log?.Invoke($"  {result.Created} created, {result.AlreadyExisted} already existed, {result.Unresolved} unresolved.");
+                        break;
+                    }
+
+                    case CommitItemType.EnvironmentVariable:
+                    {
+                        var single = (EnvironmentVariableSingleItem)item.ParsedData;
+                        log?.Invoke($"Upserting environment variable '{single.Entry.SchemaName}' into solution '{single.SolutionUniqueName}'");
+                        EnvironmentVariableWriter.UpsertSingle(client, single.SolutionUniqueName, single.Entry, log);
+                        log?.Invoke($"  Environment variable upserted OK.");
                         break;
                     }
                 }
@@ -2118,34 +2263,63 @@ public static class CommitPipeline
                 var entityLogicalName = entityGroup.Key;
                 var hideButtons = entityGroup
                     .Where(x => x.Item1.Action == "hide")
-                    .Select(x => x.Item1.ButtonId)
+                    .Select(x => x.Item1.ButtonId!)
                     .ToList();
+                var overrideItem = entityGroup
+                    .FirstOrDefault(x => x.Item1.Action == "override");
 
-                if (hideButtons.Count == 0) continue;
+                if (hideButtons.Count == 0 && overrideItem == default) continue;
 
                 try
                 {
                     var entityFolderName = FindEntityFolderName(solutionExportDir, entityLogicalName);
-                    var ribbonDiffPath = Path.Combine(solutionFolder, "Entities", entityFolderName, "RibbonDiff.xml");
-                    var existingRibbonDiffXml = File.Exists(ribbonDiffPath) ? File.ReadAllText(ribbonDiffPath) : null;
 
-                    log?.Invoke($"Importing ribbon hides for {entityLogicalName}: {string.Join(", ", hideButtons)}");
-                    RibbonImportWriter.ImportHideActions(
-                        client,
-                        metadata.Solution.UniqueName,
-                        publisherPrefix,
-                        entityLogicalName,
-                        entityFolderName,
-                        hideButtons,
-                        existingRibbonDiffXml,
-                        solutionXmlContent);
-                    log?.Invoke($"  Ribbon import OK for {entityFolderName}.");
-
-                    // Archive all items in this entity group
-                    foreach (var (_, item) in entityGroup)
+                    if (overrideItem != default)
                     {
-                        MoveToCommitted(item.FilePath, pendingDir, baseDir, archivedGitPaths);
-                        committedItems.Add(item);
+                        // Full RibbonDiff override — companion XML replaces the whole diff
+                        var xmlPath = Path.ChangeExtension(overrideItem.Item.FilePath, ".xml");
+                        var xmlContent = File.ReadAllText(xmlPath);
+                        var xmlDoc = System.Xml.Linq.XDocument.Parse(xmlContent);
+
+                        log?.Invoke($"Importing ribbon override for {entityLogicalName} from {Path.GetFileName(xmlPath)}");
+                        RibbonImportWriter.ImportOverride(
+                            client,
+                            metadata.Solution.UniqueName,
+                            entityLogicalName,
+                            entityFolderName,
+                            xmlDoc,
+                            solutionXmlContent);
+                        log?.Invoke($"  Ribbon override import OK for {entityFolderName}.");
+
+                        // Archive JSON + companion XML
+                        MoveToCommitted(overrideItem.Item.FilePath, pendingDir, baseDir, archivedGitPaths);
+                        if (File.Exists(xmlPath))
+                            MoveToCommitted(xmlPath, pendingDir, baseDir, archivedGitPaths);
+                        committedItems.Add(overrideItem.Item);
+                    }
+
+                    if (hideButtons.Count > 0)
+                    {
+                        var ribbonDiffPath = Path.Combine(solutionFolder, "Entities", entityFolderName, "RibbonDiff.xml");
+                        var existingRibbonDiffXml = File.Exists(ribbonDiffPath) ? File.ReadAllText(ribbonDiffPath) : null;
+
+                        log?.Invoke($"Importing ribbon hides for {entityLogicalName}: {string.Join(", ", hideButtons)}");
+                        RibbonImportWriter.ImportHideActions(
+                            client,
+                            metadata.Solution.UniqueName,
+                            publisherPrefix,
+                            entityLogicalName,
+                            entityFolderName,
+                            hideButtons,
+                            existingRibbonDiffXml,
+                            solutionXmlContent);
+                        log?.Invoke($"  Ribbon hides OK for {entityFolderName}.");
+
+                        foreach (var (_, item) in entityGroup.Where(x => x.Item1.Action == "hide"))
+                        {
+                            MoveToCommitted(item.FilePath, pendingDir, baseDir, archivedGitPaths);
+                            committedItems.Add(item);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -2443,6 +2617,9 @@ public static class CommitPipeline
 
     private static void MoveToCommitted(string filePath, string pendingDir, string baseDir, List<string>? archivedGitPaths = null)
     {
+        if (!File.Exists(filePath))
+            return; // Already archived by a prior item sharing the same source file
+
         var relativePath = Path.GetRelativePath(pendingDir, filePath);
         var committedPath = Path.Combine(baseDir, "SolutionExport", "_committed", relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(committedPath)!);

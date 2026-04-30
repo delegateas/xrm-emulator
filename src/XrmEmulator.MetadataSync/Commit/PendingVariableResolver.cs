@@ -29,9 +29,11 @@ public static class PendingVariableResolver
 
     /// <summary>
     /// Returns true if the file contains any pending variable references.
+    /// Returns false if the file no longer exists (e.g. already archived by a prior item sharing the same path).
     /// </summary>
     public static bool HasVariables(string filePath)
     {
+        if (!File.Exists(filePath)) return false;
         var content = File.ReadAllText(filePath);
         return VariablePattern.IsMatch(content);
     }

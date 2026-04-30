@@ -27,6 +27,7 @@ public enum CommitItemType
     AssociationsImport,
     SecurityRoleUpdate,
     SecurityRoleAssignment,
+    AppModuleRole,
     WorkflowActivation,
     WorkflowRemoveFromSolution,
     PcfControl,
@@ -38,7 +39,8 @@ public enum CommitItemType
     SlaItem,
     SlaKpi,
     RelationshipDelete,
-    EntityMetadataDelete
+    EntityMetadataDelete,
+    EnvironmentVariable
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

@@ -6,8 +6,9 @@ public record NewAttributeDefinition
     public required string AttributeLogicalName { get; init; }   // e.g. "cr_partner" (logical, lowercase)
     public required string AttributeSchemaName { get; init; }    // e.g. "cr_Partner" (PascalCase after prefix)
     public required string DisplayName { get; init; }            // e.g. "Partner"
-    public required string AttributeType { get; init; }          // "lookup", "string", "int", "decimal", "boolean", "datetime", "memo", "picklist"
+    public required string AttributeType { get; init; }          // "lookup", "string", "int", "decimal", "boolean", "datetime", "memo", "picklist", "polymorphic"
     public string? TargetEntityLogicalName { get; init; }        // For lookups: target entity (e.g. "account")
+    public List<string>? TargetEntityLogicalNames { get; init; } // For polymorphic lookups: list of target entities (e.g. ["lead", "opportunity"])
     public string? RelationshipSchemaName { get; init; }         // For lookups: e.g. "cr_lead_Partner_account"
     public int? MaxLength { get; init; }                         // For string/memo
     public string? OptionSetName { get; init; }                  // For picklist: global option set name (e.g. "kf_yesnoinherited")

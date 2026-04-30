@@ -2,6 +2,7 @@ using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Query;
 using XrmEmulator.MetadataSync.Models;
 
 namespace XrmEmulator.MetadataSync.Writers;
@@ -19,6 +20,10 @@ public static class EntityWriter
             .Where(a => a.IsCustomField)
             .ToDictionary(a => a.LogicalName, StringComparer.OrdinalIgnoreCase);
 
+        // Dataverse rejects labels whose LCID isn't provisioned on the target org.
+        // Resolve the org's base language once and tag every label we emit with it.
+        var baseLcid = GetOrgBaseLcid(service);
+
         foreach (var attr in pending.Attributes.Where(a => a.IsCustomField))
         {
             if (!snapshotLookup.TryGetValue(attr.LogicalName, out var original))
@@ -27,7 +32,7 @@ public static class EntityWriter
             if (!HasChanges(attr, original))
                 continue;
 
-            var metadata = BuildAttributeMetadata(attr, entityLogicalName);
+            var metadata = BuildAttributeMetadata(attr, entityLogicalName, baseLcid);
             if (metadata == null) continue;
 
             var request = new UpdateAttributeRequest
@@ -41,6 +46,17 @@ public static class EntityWriter
         }
 
         return changes;
+    }
+
+    private static int GetOrgBaseLcid(IOrganizationService service)
+    {
+        var query = new QueryExpression("organization")
+        {
+            ColumnSet = new ColumnSet("languagecode"),
+            TopCount = 1
+        };
+        var result = service.RetrieveMultiple(query).Entities.FirstOrDefault();
+        return result?.GetAttributeValue<int?>("languagecode") ?? 1033;
     }
 
     private static bool HasChanges(AttributeDefinition pending, AttributeDefinition original)
@@ -73,7 +89,7 @@ public static class EntityWriter
         return false;
     }
 
-    private static AttributeMetadata? BuildAttributeMetadata(AttributeDefinition attr, string entityLogicalName)
+    private static AttributeMetadata? BuildAttributeMetadata(AttributeDefinition attr, string entityLogicalName, int lcid)
     {
         var requiredLevel = ParseRequiredLevel(attr.RequiredLevel);
 
@@ -85,15 +101,15 @@ public static class EntityWriter
                 MaxLength = attr.MaxLength,
                 FormatName = ParseStringFormat(attr.Format),
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "bit" => new BooleanAttributeMetadata
             {
                 LogicalName = attr.LogicalName,
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "int" or "integer" => new IntegerAttributeMetadata
             {
@@ -101,8 +117,8 @@ public static class EntityWriter
                 MinValue = attr.MinValue,
                 MaxValue = attr.MaxValue,
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "decimal" => new DecimalAttributeMetadata
             {
@@ -111,30 +127,30 @@ public static class EntityWriter
                 MaxValue = attr.MaxValueDecimal,
                 Precision = attr.Accuracy,
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "picklist" or "state" or "status" => new PicklistAttributeMetadata
             {
                 LogicalName = attr.LogicalName,
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "datetime" => new DateTimeAttributeMetadata
             {
                 LogicalName = attr.LogicalName,
                 Format = ParseDateTimeFormat(attr.Format),
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             "lookup" or "customer" or "owner" => new LookupAttributeMetadata
             {
                 LogicalName = attr.LogicalName,
                 RequiredLevel = requiredLevel,
-                DisplayName = CreateLabel(attr.DisplayName),
-                Description = CreateLabel(attr.Description)
+                DisplayName = CreateLabel(attr.DisplayName, lcid),
+                Description = CreateLabel(attr.Description, lcid)
             },
             _ => null
         };
@@ -175,12 +191,12 @@ public static class EntityWriter
         };
     }
 
-    private static Label CreateLabel(string? text)
+    private static Label CreateLabel(string? text, int lcid)
     {
         if (string.IsNullOrEmpty(text))
             return new Label();
 
-        return new Label(text, 1033); // English
+        return new Label(text, lcid);
     }
 
     public static void PublishAll(IOrganizationService service)
