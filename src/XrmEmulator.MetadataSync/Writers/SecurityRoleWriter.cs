@@ -367,6 +367,48 @@ public static class SecurityRoleWriter
         return id;
     }
 
+    /// <summary>
+    /// Delete a security role by name. Finds and deletes all BU copies
+    /// (root + inherited child copies) to avoid orphan copies.
+    /// Logs a warning and returns if the role is not found.
+    /// </summary>
+    public static void DeleteRole(
+        IOrganizationService service,
+        SecurityRoleDeleteDefinition def,
+        Action<string>? log = null)
+    {
+        var query = new QueryExpression("role")
+        {
+            ColumnSet = new ColumnSet("roleid", "name"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("name", ConditionOperator.Equal, def.RoleName) }
+            }
+        };
+
+        var results = service.RetrieveMultiple(query);
+        if (results.Entities.Count == 0)
+        {
+            log?.Invoke($"Role '{def.RoleName}' not found — nothing to delete.");
+            return;
+        }
+
+        foreach (var role in results.Entities)
+        {
+            log?.Invoke($"Deleting role '{def.RoleName}' ({role.Id})");
+            try
+            {
+                service.Delete("role", role.Id);
+                log?.Invoke($"  Deleted OK.");
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to delete role '{def.RoleName}' ({role.Id}): {ex.Detail.Message}", ex);
+            }
+        }
+    }
+
     private static PrivilegeDepth ParseDepth(string depth)
     {
         return depth.ToLowerInvariant() switch

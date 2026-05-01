@@ -40,7 +40,8 @@ public enum CommitItemType
     SlaKpi,
     RelationshipDelete,
     EntityMetadataDelete,
-    EnvironmentVariable
+    EnvironmentVariable,
+    SecurityRoleDelete
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

@@ -387,6 +387,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Security role deletes
+        var pendingSecurityRoleDeleteFiles = Directory.GetFiles(pendingDir, "*.securityroledelete.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSecurityRoleDeleteFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SecurityRoleDeleteDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SecurityRoleDelete,
+                $"Delete Role: {parsed.RoleName}",
+                f, parsed));
+        }
+
         // Environment variables (definition + current value upsert)
         var pendingEnvVarFiles = Directory.GetFiles(pendingDir, "*.envvar.json", SearchOption.AllDirectories)
             .ToList();
@@ -658,6 +671,7 @@ public static class CommitPipeline
             [CommitItemType.RibbonWorkbench] = 22,
             [CommitItemType.EnableChangeTracking] = 2,
             [CommitItemType.EnvironmentVariable] = 20, // After entities/attributes are in place
+            [CommitItemType.SecurityRoleDelete] = 18, // After role assignments are cleaned up
         };
         commitItems.Sort((a, b) =>
         {
@@ -1983,6 +1997,14 @@ public static class CommitPipeline
                         var def = (SecurityRoleAssignmentDefinition)item.ParsedData;
                         log?.Invoke($"Assigning role: {def.RoleName} → {def.User}");
                         SecurityRoleWriter.AssignToUser(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.SecurityRoleDelete:
+                    {
+                        var def = (SecurityRoleDeleteDefinition)item.ParsedData;
+                        log?.Invoke($"Deleting role: {def.RoleName}");
+                        SecurityRoleWriter.DeleteRole(client, def, log);
                         break;
                     }
 

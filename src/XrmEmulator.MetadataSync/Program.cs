@@ -4019,6 +4019,9 @@ static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
         case "assign":
             HandleSecurityRoleAssignCommand(positionalArgs);
             break;
+        case "delete":
+            HandleSecurityRoleDeleteCommand(positionalArgs);
+            break;
         default:
             PrintSecurityRoleUsage();
             Environment.Exit(1);
@@ -4201,6 +4204,46 @@ static void PrintSecurityRoleUsage()
     AnsiConsole.MarkupLine("    Assign a security role to a systemuser/app user.");
     AnsiConsole.MarkupLine("    [grey]<user>: applicationid full name, domain name, email, full name, or systemuserid GUID[/]");
     AnsiConsole.MarkupLine("    [grey]Example: security-role assign \"_Role_LeadData_Ingest\" APPUSER-CRM-KF-DEV-ENV-PARTNERSEREVICE[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]delete[/] <role-name>");
+    AnsiConsole.MarkupLine("    Stage deletion of a security role from CRM (all BU copies removed).");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role delete \"_Role_AppUser_KF-Integration\"[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// security-role delete <role-name> — stage a role deletion
+// ──────────────────────────────────────────────────────────────
+static void HandleSecurityRoleDeleteCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] security-role delete <role-name>");
+        AnsiConsole.MarkupLine("[grey]Example: security-role delete \"_Role_AppUser_KF-Integration\"[/]");
+        Environment.Exit(1);
+    }
+
+    var roleName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SecurityRoleDeletes");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = roleName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.securityroledelete.json");
+
+    var def = new SecurityRoleDeleteDefinition { RoleName = roleName };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged role delete:[/] {roleName}");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine($"[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 static void HandleSecurityRoleAddCommand(string[] positionalArgs)
@@ -4563,6 +4606,15 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
     var constructor = controlEl.Attribute("constructor")!.Value;
     var controlName = $"{ns}.{constructor}";
 
+    // Auto-bump patch version
+    var oldVersion = controlEl.Attribute("version")?.Value ?? "1.0.0";
+    var vParts = oldVersion.Split('.');
+    var newVersion = vParts.Length == 3 && int.TryParse(vParts[2], out var patch)
+        ? $"{vParts[0]}.{vParts[1]}.{patch + 1}"
+        : oldVersion;
+    controlEl.SetAttributeValue("version", newVersion);
+    manifest.Save(manifestFiles[0]);
+
     var prefix = "kf";
     for (int i = 0; i < allArgs.Length - 1; i++)
     {
@@ -4579,6 +4631,62 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
     {
         AnsiConsole.MarkupLine($"[yellow]Warning:[/] cdsproj not found at: {cdsProj}");
         AnsiConsole.MarkupLine($"[yellow]Run 'pac pcf push --publisher-prefix {prefix}' once to scaffold it.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Build: npm run build
+    AnsiConsole.MarkupLine("[grey]Building PCF (npm run build)…[/]");
+    var npmBuild = new System.Diagnostics.Process
+    {
+        StartInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "npm",
+            Arguments = "run build",
+            WorkingDirectory = projectPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        }
+    };
+    npmBuild.Start();
+    var npmOut = npmBuild.StandardOutput.ReadToEnd();
+    var npmErr = npmBuild.StandardError.ReadToEnd();
+    npmBuild.WaitForExit();
+    if (npmBuild.ExitCode != 0)
+    {
+        AnsiConsole.MarkupLine($"[red]npm run build failed:[/]");
+        AnsiConsole.WriteLine(npmOut);
+        AnsiConsole.WriteLine(npmErr);
+        Environment.Exit(1);
+        return;
+    }
+
+    // Pack: dotnet build cdsproj
+    AnsiConsole.MarkupLine("[grey]Packing solution zip (dotnet build cdsproj)…[/]");
+    var dotnetBuild = new System.Diagnostics.Process
+    {
+        StartInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = $"build \"{cdsProj}\"",
+            WorkingDirectory = projectPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        }
+    };
+    dotnetBuild.Start();
+    var dotnetOut = dotnetBuild.StandardOutput.ReadToEnd();
+    var dotnetErr = dotnetBuild.StandardError.ReadToEnd();
+    dotnetBuild.WaitForExit();
+    if (dotnetBuild.ExitCode != 0)
+    {
+        AnsiConsole.MarkupLine($"[red]dotnet build failed:[/]");
+        AnsiConsole.WriteLine(dotnetOut);
+        AnsiConsole.WriteLine(dotnetErr);
+        Environment.Exit(1);
+        return;
     }
 
     var def = new PcfControlDefinition
@@ -4602,6 +4710,7 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
     AnsiConsole.MarkupLine($"[grey]  File: {Path.GetRelativePath(baseDir, filePath)}[/]");
     AnsiConsole.MarkupLine($"[grey]  Project: {projectPath}[/]");
     AnsiConsole.MarkupLine($"[grey]  Prefix: {prefix}[/]");
+    AnsiConsole.MarkupLine($"[grey]  Version: {oldVersion} → {newVersion}[/]");
 }
 
 static void HandleImportCommand(string[] positionalArgs, string[] allArgs)
@@ -6171,6 +6280,16 @@ static void HandlePendingCommand()
         items.Add(("Security Role", $"{parsed.RoleName} ({parsed.Privileges.Count} privileges)", Path.GetRelativePath(pendingDir, f)));
     }
 
+    var pendingSecurityRoleDeleteFiles = Directory.GetFiles(pendingDir, "*.securityroledelete.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSecurityRoleDeleteFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SecurityRoleDeleteDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Delete Role", parsed.RoleName, Path.GetRelativePath(pendingDir, f)));
+    }
+
     var pendingSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.solutioncomponent.json", SearchOption.AllDirectories)
         .ToList();
 
@@ -6459,6 +6578,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
             || item.Type == CommitItemType.RibbonWorkbench
             || item.Type == CommitItemType.RelationshipUpdate
             || item.Type == CommitItemType.SecurityRoleUpdate
+            || item.Type == CommitItemType.SecurityRoleDelete
             || item.Type == CommitItemType.DataImport
             || isNewView || isNewForm || isNewBusinessRule)
         {
