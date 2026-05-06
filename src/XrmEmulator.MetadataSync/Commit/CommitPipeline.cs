@@ -1159,6 +1159,7 @@ public static class CommitPipeline
                             {
                                 log?.Invoke($"  Cascade mode: discovering restrict-delete children...");
                                 CascadeDeleteRestrictChildren(client, def.EntityType, componentId, log, new HashSet<(string, Guid)>());
+                                CascadeDeleteEntitySpecificChildren(client, def.EntityType, componentId, log);
                             }
 
                             client.Delete(def.EntityType, componentId);
@@ -3058,6 +3059,91 @@ public static class CommitPipeline
                 log?.Invoke($"    Deleting {rel.ReferencingEntity}: {child.Id}");
                 client.Delete(rel.ReferencingEntity, child.Id);
             }
+        }
+    }
+
+    /// <summary>
+    /// Delete child records that block deletion but aren't reachable via cascade-Restrict
+    /// relationships. Add cases here as needed; the relationship walker covers most
+    /// custom entities, but a few system entities (pluginassembly is the known one) hold
+    /// dependent records via polymorphic lookups or solution-component links that the
+    /// generic walker can't see.
+    /// </summary>
+    private static void CascadeDeleteEntitySpecificChildren(
+        IOrganizationService client,
+        string entityType,
+        Guid recordId,
+        Action<string>? log)
+    {
+        switch (entityType)
+        {
+            case "pluginassembly":
+                CascadeDeletePluginAssemblyChildren(client, recordId, log);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Walks pluginassembly → plugintype → sdkmessageprocessingstep → sdkmessageprocessingstepimage
+    /// and deletes from the bottom up. The step→plugintype link is the polymorphic
+    /// <c>eventhandler</c> lookup, which the generic Restrict walker doesn't traverse.
+    /// </summary>
+    private static void CascadeDeletePluginAssemblyChildren(
+        IOrganizationService client,
+        Guid pluginAssemblyId,
+        Action<string>? log)
+    {
+        var pluginTypes = client.RetrieveMultiple(new QueryExpression("plugintype")
+        {
+            ColumnSet = new ColumnSet("plugintypeid", "typename"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("pluginassemblyid", ConditionOperator.Equal, pluginAssemblyId) }
+            }
+        }).Entities;
+
+        if (pluginTypes.Count == 0) return;
+        log?.Invoke($"  Found {pluginTypes.Count} plugintype(s) for pluginassembly");
+
+        foreach (var pt in pluginTypes)
+        {
+            var typeName = pt.GetAttributeValue<string>("typename") ?? pt.Id.ToString();
+
+            var steps = client.RetrieveMultiple(new QueryExpression("sdkmessageprocessingstep")
+            {
+                ColumnSet = new ColumnSet("sdkmessageprocessingstepid", "name"),
+                Criteria = new FilterExpression
+                {
+                    Conditions = { new ConditionExpression("eventhandler", ConditionOperator.Equal, pt.Id) }
+                }
+            }).Entities;
+
+            if (steps.Count > 0)
+                log?.Invoke($"    Found {steps.Count} step(s) on {typeName}");
+
+            foreach (var step in steps)
+            {
+                var images = client.RetrieveMultiple(new QueryExpression("sdkmessageprocessingstepimage")
+                {
+                    ColumnSet = new ColumnSet("sdkmessageprocessingstepimageid"),
+                    Criteria = new FilterExpression
+                    {
+                        Conditions = { new ConditionExpression("sdkmessageprocessingstepid", ConditionOperator.Equal, step.Id) }
+                    }
+                }).Entities;
+
+                foreach (var img in images)
+                {
+                    log?.Invoke($"      Deleting sdkmessageprocessingstepimage {img.Id}");
+                    client.Delete("sdkmessageprocessingstepimage", img.Id);
+                }
+
+                log?.Invoke($"    Deleting sdkmessageprocessingstep '{step.GetAttributeValue<string>("name")}' ({step.Id})");
+                client.Delete("sdkmessageprocessingstep", step.Id);
+            }
+
+            log?.Invoke($"  Deleting plugintype '{typeName}' ({pt.Id})");
+            client.Delete("plugintype", pt.Id);
         }
     }
 }
