@@ -321,6 +321,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Plug-in managed-identity bindings
+        var pendingPluginMiFiles = Directory.GetFiles(pendingDir, "*.pluginmi.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("PluginManagedIdentities", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var f in pendingPluginMiFiles)
+        {
+            var parsed = PluginManagedIdentityFileReader.Parse(f);
+            commitItems.Add(new CommitItem(CommitItemType.PluginManagedIdentity,
+                $"Plugin MI: {parsed.AssemblyName} → {parsed.ApplicationId}",
+                f, parsed));
+        }
+
         // Custom API registrations
         var pendingCustomApiFiles = Directory.GetFiles(pendingDir, "*.customapi.json", SearchOption.AllDirectories)
             .Where(f => f.Contains("CustomApis", StringComparison.OrdinalIgnoreCase))
@@ -686,6 +699,7 @@ public static class CommitPipeline
             [CommitItemType.PcfControl] = 14,
             [CommitItemType.PluginRegistration] = 15,
             [CommitItemType.CustomApiRegistration] = 15, // Same as plugin — runs after assembly but references plugin type
+            [CommitItemType.PluginManagedIdentity] = 16, // Must run after PluginRegistration: Dataverse rejects the assembly→MI link with 0x80040216 ("Plugin assembly must be signed with valid certificate to associate to Managed Identity") if the assembly isn't yet live and Authenticode-signed.
             [CommitItemType.SlaKpi] = 14,  // Before SLA items — items reference KPIs
             [CommitItemType.SlaItem] = 15,
             [CommitItemType.DataImport] = 16,
@@ -2159,6 +2173,27 @@ public static class CommitPipeline
                         var apiId = CustomApiWriter.Upsert(client, def, log);
                         log?.Invoke($"  Custom API registered OK. ID: {apiId}");
                         resolvedOutputs[relativePath] = new Dictionary<string, string> { ["id"] = apiId.ToString() };
+                        break;
+                    }
+
+                    case CommitItemType.PluginManagedIdentity:
+                    {
+                        var def = (PluginManagedIdentityDefinition)item.ParsedData;
+                        log?.Invoke($"Linking plug-in assembly to managed identity: {def.AssemblyName} → {def.ApplicationId}");
+                        var result = PluginManagedIdentityWriter.Apply(client, def);
+                        if (result.ManagedIdentityCreated)
+                            log?.Invoke($"  Created managedidentity {result.ManagedIdentityId}.");
+                        else
+                            log?.Invoke($"  Reused existing managedidentity {result.ManagedIdentityId}.");
+                        if (result.LinkUpdated)
+                            log?.Invoke($"  Linked pluginassembly {result.PluginAssemblyId} to managedidentity.");
+                        else
+                            log?.Invoke($"  Plug-in assembly already linked — no change.");
+                        resolvedOutputs[relativePath] = new Dictionary<string, string>
+                        {
+                            ["id"] = result.ManagedIdentityId.ToString(),
+                            ["pluginAssemblyId"] = result.PluginAssemblyId.ToString()
+                        };
                         break;
                     }
 

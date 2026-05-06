@@ -4,6 +4,7 @@ using DG.Tools.XrmMockup;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Organization;
 using Spectre.Console;
 using XrmEmulator.MetadataSync.Commit;
 using XrmEmulator.MetadataSync.Connection;
@@ -15,6 +16,9 @@ using XrmEmulator.MetadataSync.Git;
 using XrmEmulator.MetadataSync.Writers;
 using XrmEmulator.MetadataSync.Mcp;
 using System.ServiceModel;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Crm.Sdk.Messages;
 
 // ──────────────────────────────────────────────────────────────
@@ -156,9 +160,19 @@ try
     {
         HandleDeprecateCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 2
+        && positionalArgs[0].Equals("plugin", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("attach-mi", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandlePluginAttachMiCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("plugin", StringComparison.OrdinalIgnoreCase))
     {
         HandlePluginCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("cert", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleCertCommand(positionalArgs, args, configuration, noCache);
     }
     else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("environment-variable", StringComparison.OrdinalIgnoreCase)
         && positionalArgs[1].Equals("add", StringComparison.OrdinalIgnoreCase))
@@ -2137,6 +2151,10 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
     AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
     AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
+    AnsiConsole.MarkupLine("  [bold]plugin register|update|remove|sign[/] ...             Plug-in lifecycle (last is Authenticode sign)");
+    AnsiConsole.MarkupLine("  [bold]plugin attach-mi[/] <asm> --client-id <id> --tenant <id>  Bind plug-in assembly to a UAMI for KV access");
+    AnsiConsole.MarkupLine("  [bold]cert generate[/] [[--name <cn>]] [[--out <pfx>]] [[--password <p>]] [[--years <n>]]  Generate a self-signed code-signing cert");
+    AnsiConsole.MarkupLine("  [bold]cert show-fic[/] [[--pfx <path>]] [[--password <p>]]    Print Power Platform federated identity credential values");
     AnsiConsole.MarkupLine("  [bold]commit[/]                                             Push pending changes to CRM");
     AnsiConsole.MarkupLine("  [bold]git-init[/]                                           Initialize git tracking in SolutionExport/");
     AnsiConsole.WriteLine();
@@ -5609,6 +5627,12 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
         return;
     }
 
+    if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("sign", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePluginSignCommand(positionalArgs, allArgs);
+        return;
+    }
+
     if (positionalArgs.Length < 2 || (
         !positionalArgs[1].Equals("register", StringComparison.OrdinalIgnoreCase) &&
         !positionalArgs[1].Equals("update", StringComparison.OrdinalIgnoreCase)))
@@ -5617,6 +5641,7 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
         AnsiConsole.MarkupLine("  plugin register <dll-path>     Create a new plugin registration pending file");
         AnsiConsole.MarkupLine("  plugin update <dll-path>       Re-sync a previously registered plugin (keeps types/steps)");
         AnsiConsole.MarkupLine("  plugin remove <assembly-name>  Remove a plugin assembly and its steps from CRM");
+        AnsiConsole.MarkupLine("  plugin sign <dll-path>         Authenticode-sign a plugin DLL with the env's signing cert");
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[grey]Example: plugin register src/MyPlugin/bin/Release/net462/MyPlugin.dll[/]");
         Environment.Exit(1);
@@ -5865,6 +5890,538 @@ static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
 
     if (assemblyId == Guid.Empty)
         AnsiConsole.MarkupLine("[red]WARNING: Could not find assembly in solution export. You may need to set the ComponentId manually.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// cert generate / cert show-fic — Power Platform managed-identity
+// helpers for plug-in Authenticode signing + FIC configuration.
+// See: https://learn.microsoft.com/power-platform/admin/managed-identity-overview
+// ──────────────────────────────────────────────────────────────
+static async Task HandleCertCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 2)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  cert generate [[--name <cn>]] [[--out <pfx-path>]] [[--password <p>]] [[--years <n>]]");
+        AnsiConsole.MarkupLine("  cert show-fic [[--pfx <path>]] [[--password <p>]]");
+        Environment.Exit(1);
+    }
+
+    var sub = positionalArgs[1].ToLowerInvariant();
+    if (sub == "generate")
+    {
+        HandleCertGenerateCommand(allArgs);
+    }
+    else if (sub == "show-fic")
+    {
+        await HandleCertShowFicCommand(allArgs, configuration, noCache);
+    }
+    else
+    {
+        AnsiConsole.MarkupLine($"[red]Unknown cert subcommand:[/] {sub}");
+        Environment.Exit(1);
+    }
+}
+
+static (string PfxPath, string CerPath) ResolveDefaultCertPaths()
+{
+    var metadataPath = FindConnectionMetadata();
+    var metadataDir = Path.GetDirectoryName(metadataPath)!;       // <env-dir>/.metadatasync
+    var envDir = Path.GetDirectoryName(metadataDir)!;             // <env-dir>
+    var envAlias = Path.GetFileName(Path.GetDirectoryName(envDir)!); // parent of env-dir, e.g. "kf-dev"
+
+    // Repo-relative convention: docs/managed-identity/<env-alias>/plugin-signing.{pfx,cer}.
+    // Walk up looking for the .git directory to find the repo root, then check docs/.
+    var probe = envDir;
+    while (!string.IsNullOrEmpty(probe))
+    {
+        if (Directory.Exists(Path.Combine(probe, ".git")))
+        {
+            var docsCertDir = Path.Combine(probe, "docs", "managed-identity", envAlias);
+            var docsPfx = Path.Combine(docsCertDir, "plugin-signing.pfx");
+            if (File.Exists(docsPfx))
+                return (docsPfx, Path.Combine(docsCertDir, "plugin-signing.cer"));
+            // Even when the file doesn't exist yet, prefer docs path for `cert generate`
+            // if the docs/managed-identity/ tree is already present.
+            if (Directory.Exists(Path.Combine(probe, "docs", "managed-identity")))
+            {
+                Directory.CreateDirectory(docsCertDir);
+                return (docsPfx, Path.Combine(docsCertDir, "plugin-signing.cer"));
+            }
+            break;
+        }
+        var parent = Path.GetDirectoryName(probe);
+        if (parent == probe) break;
+        probe = parent!;
+    }
+
+    // Fallback: per-env metadata folder (the generic MetadataSync default).
+    return (
+        Path.Combine(metadataDir, "plugin-signing.pfx"),
+        Path.Combine(metadataDir, "plugin-signing.cer"));
+}
+
+static string ResolveSigningPassword(string[] allArgs)
+{
+    var fromArg = ParseNamedArg(allArgs, "--password");
+    if (!string.IsNullOrEmpty(fromArg)) return fromArg;
+    var fromEnv = Environment.GetEnvironmentVariable("XRM_PLUGIN_SIGN_PASSWORD");
+    if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
+    AnsiConsole.MarkupLine("[red]Password required.[/] Pass --password <p> or set XRM_PLUGIN_SIGN_PASSWORD.");
+    Environment.Exit(1);
+    return null!;
+}
+
+static void HandleCertGenerateCommand(string[] allArgs)
+{
+    var name = ParseNamedArg(allArgs, "--name") ?? "KF Plugin Signing";
+    var outArg = ParseNamedArg(allArgs, "--out");
+    var yearsArg = ParseNamedArg(allArgs, "--years");
+    var years = int.TryParse(yearsArg, out var y) ? y : 2;
+
+    string pfxPath, cerPath;
+    if (!string.IsNullOrEmpty(outArg))
+    {
+        pfxPath = outArg;
+        var dir = Path.GetDirectoryName(pfxPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+        cerPath = Path.ChangeExtension(pfxPath, ".cer");
+    }
+    else
+    {
+        (pfxPath, cerPath) = ResolveDefaultCertPaths();
+        Directory.CreateDirectory(Path.GetDirectoryName(pfxPath)!);
+    }
+
+    var password = ResolveSigningPassword(allArgs);
+
+    using var rsa = RSA.Create(2048);
+    var subject = new X500DistinguishedName($"CN={name}");
+    var req = new CertificateRequest(subject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+    // EKU = Code Signing (1.3.6.1.5.5.7.3.3)
+    req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+        new OidCollection { new Oid("1.3.6.1.5.5.7.3.3") }, critical: true));
+    // Key Usage = Digital Signature
+    req.CertificateExtensions.Add(new X509KeyUsageExtension(
+        X509KeyUsageFlags.DigitalSignature, critical: true));
+    // Subject Key Identifier
+    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
+
+    var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
+    var notAfter = DateTimeOffset.UtcNow.AddYears(years);
+    using var cert = req.CreateSelfSigned(notBefore, notAfter);
+
+    File.WriteAllBytes(pfxPath, cert.Export(X509ContentType.Pfx, password));
+    File.WriteAllBytes(cerPath, cert.Export(X509ContentType.Cert));
+
+    AnsiConsole.MarkupLine("[green]Code-signing certificate generated:[/]");
+    AnsiConsole.MarkupLine($"  Subject:    CN={name}");
+    AnsiConsole.MarkupLine($"  Valid:      {notBefore:yyyy-MM-dd} → {notAfter:yyyy-MM-dd} ({years}y)");
+    AnsiConsole.MarkupLine($"  Thumbprint: [bold]{cert.Thumbprint}[/]");
+    AnsiConsole.MarkupLine($"  PFX:        {pfxPath}");
+    AnsiConsole.MarkupLine($"  CER:        {cerPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Next:[/]");
+    AnsiConsole.MarkupLine("  1. [bold]plugin sign <dll>[/] — Authenticode-sign the plug-in DLL with this cert.");
+    AnsiConsole.MarkupLine("  2. [bold]cert show-fic[/]    — print the federated identity credential values to paste into your Entra UAMI / app-reg.");
+}
+
+static void HandlePluginSignCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin sign <dll-path> [[--pfx <path>]] [[--password <p>]]");
+        Environment.Exit(1);
+    }
+
+    var dllPath = positionalArgs[2];
+    if (!File.Exists(dllPath))
+    {
+        var fullPath = Path.GetFullPath(dllPath);
+        if (!File.Exists(fullPath))
+        {
+            AnsiConsole.MarkupLine($"[red]DLL not found:[/] {dllPath}");
+            Environment.Exit(1);
+        }
+        dllPath = fullPath;
+    }
+
+    var pfxPath = ParseNamedArg(allArgs, "--pfx");
+    if (string.IsNullOrEmpty(pfxPath))
+        pfxPath = ResolveDefaultCertPaths().PfxPath;
+    if (!File.Exists(pfxPath))
+    {
+        AnsiConsole.MarkupLine($"[red]Signing cert not found:[/] {pfxPath}");
+        AnsiConsole.MarkupLine("[grey]Run [blue]cert generate[/] first or pass --pfx <path>.[/]");
+        Environment.Exit(1);
+    }
+
+    var password = ResolveSigningPassword(allArgs);
+
+    if (OperatingSystem.IsWindows())
+    {
+        SignWithSigntool(dllPath, pfxPath, password);
+    }
+    else
+    {
+        SignWithOsslsigncode(dllPath, pfxPath, password);
+    }
+
+    // Re-read cert from pfx to confirm thumbprint matches what FIC expects.
+    using var cert = X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password);
+    AnsiConsole.MarkupLine($"[green]Signed:[/] {dllPath}");
+    AnsiConsole.MarkupLine($"  Thumbprint: [bold]{cert.Thumbprint}[/]");
+}
+
+static void SignWithOsslsigncode(string dllPath, string pfxPath, string password)
+{
+    var signedPath = dllPath + ".signed";
+
+    // Prefer native osslsigncode if present; fall back to running it inside a
+    // Docker container so we don't require sudo on the host.
+    bool useNative = IsToolOnPath("osslsigncode");
+    bool useDocker = !useNative && IsToolOnPath("docker");
+
+    if (!useNative && !useDocker)
+    {
+        AnsiConsole.MarkupLine("[red]No way to run osslsigncode found.[/] Install one of:");
+        AnsiConsole.MarkupLine("  Native (Debian/Ubuntu): [grey]sudo apt-get install osslsigncode[/]");
+        AnsiConsole.MarkupLine("  Native (macOS):         [grey]brew install osslsigncode[/]");
+        AnsiConsole.MarkupLine("  Docker fallback:        [grey]docker pull (any image with osslsigncode)[/]");
+        Environment.Exit(1);
+    }
+
+    var psi = new ProcessStartInfo
+    {
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+
+    if (useNative)
+    {
+        psi.FileName = "osslsigncode";
+        psi.ArgumentList.Add("sign");
+        psi.ArgumentList.Add("-pkcs12"); psi.ArgumentList.Add(pfxPath);
+        psi.ArgumentList.Add("-pass");   psi.ArgumentList.Add(password);
+        psi.ArgumentList.Add("-h");      psi.ArgumentList.Add("sha256");
+        psi.ArgumentList.Add("-in");     psi.ArgumentList.Add(dllPath);
+        psi.ArgumentList.Add("-out");    psi.ArgumentList.Add(signedPath);
+    }
+    else
+    {
+        // Build a minimal image on first use; subsequent runs reuse the cached layer.
+        EnsureOsslsigncodeDockerImage();
+
+        // Mount the parent dir of the DLL and the pfx so the container can read both.
+        var dllDir = Path.GetDirectoryName(Path.GetFullPath(dllPath))!;
+        var pfxFullPath = Path.GetFullPath(pfxPath);
+        var pfxDir = Path.GetDirectoryName(pfxFullPath)!;
+        var dllName = Path.GetFileName(dllPath);
+        var pfxName = Path.GetFileName(pfxPath);
+
+        psi.FileName = "docker";
+        psi.ArgumentList.Add("run");
+        psi.ArgumentList.Add("--rm");
+        // Run as the host user so the signed file isn't owned by root.
+        if (!OperatingSystem.IsWindows())
+        {
+            var uidGid = GetCurrentUidGid();
+            if (uidGid != null)
+            {
+                psi.ArgumentList.Add("--user");
+                psi.ArgumentList.Add(uidGid);
+            }
+        }
+        psi.ArgumentList.Add("-v"); psi.ArgumentList.Add($"{dllDir}:/work");
+        // If the pfx is in a different folder, mount it at /pfx; otherwise share /work.
+        bool pfxSeparateMount = !string.Equals(dllDir, pfxDir, StringComparison.Ordinal);
+        if (pfxSeparateMount)
+        {
+            psi.ArgumentList.Add("-v");
+            psi.ArgumentList.Add($"{pfxDir}:/pfx:ro");
+        }
+        psi.ArgumentList.Add("kf-osslsigncode:latest");
+        psi.ArgumentList.Add("sign");
+        psi.ArgumentList.Add("-pkcs12"); psi.ArgumentList.Add(pfxSeparateMount ? $"/pfx/{pfxName}" : $"/work/{pfxName}");
+        psi.ArgumentList.Add("-pass");   psi.ArgumentList.Add(password);
+        psi.ArgumentList.Add("-h");      psi.ArgumentList.Add("sha256");
+        psi.ArgumentList.Add("-in");     psi.ArgumentList.Add($"/work/{dllName}");
+        psi.ArgumentList.Add("-out");    psi.ArgumentList.Add($"/work/{dllName}.signed");
+    }
+
+    using var proc = Process.Start(psi)!;
+    var stdout = proc.StandardOutput.ReadToEnd();
+    var stderr = proc.StandardError.ReadToEnd();
+    proc.WaitForExit();
+    if (proc.ExitCode != 0)
+    {
+        AnsiConsole.MarkupLine($"[red]osslsigncode failed (exit {proc.ExitCode})[/]");
+        if (!string.IsNullOrWhiteSpace(stdout)) AnsiConsole.WriteLine(stdout);
+        if (!string.IsNullOrWhiteSpace(stderr)) AnsiConsole.WriteLine(stderr);
+        Environment.Exit(1);
+    }
+    File.Move(signedPath, dllPath, overwrite: true);
+}
+
+static void EnsureOsslsigncodeDockerImage()
+{
+    // Image inspect is fast — only build if missing.
+    var inspect = new ProcessStartInfo
+    {
+        FileName = "docker",
+        ArgumentList = { "image", "inspect", "kf-osslsigncode:latest" },
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+    using (var p = Process.Start(inspect)!)
+    {
+        p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        if (p.ExitCode == 0) return;
+    }
+
+    AnsiConsole.MarkupLine("[grey]Building kf-osslsigncode:latest Docker image (one-time, ~30s)...[/]");
+    var dockerfile = "FROM debian:stable-slim\nRUN apt-get update -qq && apt-get install -y -qq osslsigncode && rm -rf /var/lib/apt/lists/*\nENTRYPOINT [\"osslsigncode\"]\n";
+    var build = new ProcessStartInfo
+    {
+        FileName = "docker",
+        ArgumentList = { "build", "-t", "kf-osslsigncode:latest", "-" },
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+    using var bp = Process.Start(build)!;
+    bp.StandardInput.Write(dockerfile);
+    bp.StandardInput.Close();
+    bp.StandardOutput.ReadToEnd();
+    var err = bp.StandardError.ReadToEnd();
+    bp.WaitForExit();
+    if (bp.ExitCode != 0)
+    {
+        AnsiConsole.MarkupLine($"[red]Failed to build osslsigncode Docker image (exit {bp.ExitCode})[/]");
+        if (!string.IsNullOrWhiteSpace(err)) AnsiConsole.WriteLine(err);
+        Environment.Exit(1);
+    }
+}
+
+static void SignWithSigntool(string dllPath, string pfxPath, string password)
+{
+    if (!IsToolOnPath("signtool"))
+    {
+        AnsiConsole.MarkupLine("[red]signtool.exe not found on PATH.[/] Install the Windows SDK or add the SDK's bin directory to PATH.");
+        Environment.Exit(1);
+    }
+
+    var psi = new ProcessStartInfo
+    {
+        FileName = "signtool",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+    psi.ArgumentList.Add("sign");
+    psi.ArgumentList.Add("/f"); psi.ArgumentList.Add(pfxPath);
+    psi.ArgumentList.Add("/p"); psi.ArgumentList.Add(password);
+    psi.ArgumentList.Add("/fd"); psi.ArgumentList.Add("sha256");
+    psi.ArgumentList.Add(dllPath);
+
+    using var proc = Process.Start(psi)!;
+    var stdout = proc.StandardOutput.ReadToEnd();
+    var stderr = proc.StandardError.ReadToEnd();
+    proc.WaitForExit();
+    if (proc.ExitCode != 0)
+    {
+        AnsiConsole.MarkupLine($"[red]signtool failed (exit {proc.ExitCode})[/]");
+        if (!string.IsNullOrWhiteSpace(stdout)) AnsiConsole.WriteLine(stdout);
+        if (!string.IsNullOrWhiteSpace(stderr)) AnsiConsole.WriteLine(stderr);
+        Environment.Exit(1);
+    }
+}
+
+static string? GetCurrentUidGid()
+{
+    try
+    {
+        string Run(string args)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "id",
+                Arguments = args,
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            using var p = Process.Start(psi)!;
+            var output = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit();
+            return output;
+        }
+        var uid = Run("-u");
+        var gid = Run("-g");
+        if (string.IsNullOrEmpty(uid) || string.IsNullOrEmpty(gid)) return null;
+        return $"{uid}:{gid}";
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static bool IsToolOnPath(string tool)
+{
+    var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+    var sep = OperatingSystem.IsWindows() ? ';' : ':';
+    var exts = OperatingSystem.IsWindows()
+        ? new[] { ".exe", ".cmd", ".bat" }
+        : new[] { "" };
+    foreach (var dir in pathEnv.Split(sep, StringSplitOptions.RemoveEmptyEntries))
+    {
+        foreach (var ext in exts)
+        {
+            if (File.Exists(Path.Combine(dir, tool + ext))) return true;
+        }
+    }
+    return false;
+}
+
+static async Task HandleCertShowFicCommand(string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    var pfxPath = ParseNamedArg(allArgs, "--pfx");
+    if (string.IsNullOrEmpty(pfxPath))
+        pfxPath = ResolveDefaultCertPaths().PfxPath;
+    if (!File.Exists(pfxPath))
+    {
+        AnsiConsole.MarkupLine($"[red]Cert not found:[/] {pfxPath}");
+        AnsiConsole.MarkupLine("[grey]Run [blue]cert generate[/] first.[/]");
+        Environment.Exit(1);
+    }
+
+    var password = ResolveSigningPassword(allArgs);
+
+    using var cert = X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password);
+    var thumbprintSha1 = cert.Thumbprint!;
+
+    // Resolve env ID + tenant ID from Dataverse.
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse to read environment id...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+
+    var orgReq = new RetrieveCurrentOrganizationRequest { AccessType = EndpointAccessType.Default };
+    var orgResp = (RetrieveCurrentOrganizationResponse)client.Execute(orgReq);
+    var envId = orgResp.Detail.EnvironmentId;
+    var tenantId = orgResp.Detail.TenantId;
+    var orgUrl = orgResp.Detail.Endpoints.TryGetValue(EndpointType.OrganizationService, out var orgSvcUrl)
+        ? orgSvcUrl : metadata.Environment.Url;
+
+    // Per https://learn.microsoft.com/power-platform/admin/set-up-managed-identity:
+    //   Issuer:  https://login.microsoftonline.com/{tenantId}/v2.0
+    //   Subject (self-signed): /eid1/c/pub/t/{encodedTenantId}/a/qzXoWDkuqUa3l6zM5mM0Rw/n/plugin/e/{envId}/h/{sha256OfCer}
+    //   Audience: api://AzureADTokenExchange (public cloud)
+    var issuer = $"https://login.microsoftonline.com/{tenantId}/v2.0";
+
+    // {encodedTenantId} = Base64URL of the tenant GUID using the .NET Guid byte order
+    // (first three fields little-endian) — that's what Power Platform's STS sends in the
+    // assertion's `sub` claim, as confirmed by the AADSTS700213 mismatch error.
+    var tenantBytes = Guid.Parse(tenantId).ToByteArray();
+    var encodedTenantId = Convert.ToBase64String(tenantBytes)
+        .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    // {hash} = SHA-256 of the cert DER bytes, lowercase hex (matches certutil -hashfile output).
+    var certSha256 = Convert.ToHexString(SHA256.HashData(cert.RawData)).ToLowerInvariant();
+
+    var subject = $"/eid1/c/pub/t/{encodedTenantId}/a/qzXoWDkuqUa3l6zM5mM0Rw/n/plugin/e/{envId}/h/{certSha256}";
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Federated identity credential — paste into the UAMI's federated credential (Other issuer / Explicit subject identifier):[/]");
+    AnsiConsole.MarkupLine($"  Issuer:    [bold]{issuer}[/]");
+    AnsiConsole.MarkupLine($"  Subject:   [bold]{subject}[/]");
+    AnsiConsole.MarkupLine($"  Audience:  [bold]api://AzureADTokenExchange[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]Context:[/]");
+    AnsiConsole.MarkupLine($"  TenantId:        {tenantId}");
+    AnsiConsole.MarkupLine($"  EnvironmentId:   {envId}");
+    AnsiConsole.MarkupLine($"  encodedTenantId: {encodedTenantId}");
+    AnsiConsole.MarkupLine($"  Cert SHA-1:      {thumbprintSha1}");
+    AnsiConsole.MarkupLine($"  Cert SHA-256:    {certSha256}");
+    AnsiConsole.MarkupLine($"  Org URL:         {orgUrl}");
+    AnsiConsole.MarkupLine($"  Cert PFX:        {pfxPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]If Entra rejects the FIC, the AADSTS700213 error in plug-in trace shows the assertion's issuer/subject — match those exactly.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// plugin attach-mi — stage a pending file binding a plug-in
+// assembly to a Power Platform managed identity. The actual CRM
+// writes (create managedidentity, PATCH pluginassembly) happen in
+// the commit pipeline via PluginManagedIdentityWriter.
+// ──────────────────────────────────────────────────────────────
+static Task HandlePluginAttachMiCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin attach-mi <assembly-name> --client-id <uami-app-id> --tenant <uami-tenant-id>");
+        Environment.Exit(1);
+    }
+
+    var assemblyName = positionalArgs[2];
+    var clientIdArg = ParseNamedArg(allArgs, "--client-id");
+    var tenantArg = ParseNamedArg(allArgs, "--tenant");
+    if (string.IsNullOrEmpty(clientIdArg) || string.IsNullOrEmpty(tenantArg))
+    {
+        AnsiConsole.MarkupLine("[red]--client-id and --tenant are required.[/]");
+        Environment.Exit(1);
+    }
+    if (!Guid.TryParse(clientIdArg, out var clientId))
+    {
+        AnsiConsole.MarkupLine("[red]--client-id must be a GUID.[/]");
+        Environment.Exit(1);
+    }
+    if (!Guid.TryParse(tenantArg, out var tenantId))
+    {
+        AnsiConsole.MarkupLine("[red]--tenant must be a GUID.[/]");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "PluginManagedIdentities");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new XrmEmulator.MetadataSync.Models.PluginManagedIdentityDefinition
+    {
+        AssemblyName = assemblyName,
+        ApplicationId = clientId,
+        TenantId = tenantId
+    };
+
+    var safeName = assemblyName.Replace(" ", "_").Replace("/", "_").Replace("\\", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.pluginmi.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine("[green]Plug-in managed-identity binding staged:[/]");
+    AnsiConsole.MarkupLine($"  Assembly:          {assemblyName}");
+    AnsiConsole.MarkupLine($"  UAMI Application:  {clientId}");
+    AnsiConsole.MarkupLine($"  UAMI Tenant:       {tenantId}");
+    AnsiConsole.MarkupLine($"  File:              {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to apply. The plug-in DLL must already be Authenticode-signed and pushed first.[/]");
+
+    return Task.CompletedTask;
 }
 
 // ──────────────────────────────────────────────────────────────
