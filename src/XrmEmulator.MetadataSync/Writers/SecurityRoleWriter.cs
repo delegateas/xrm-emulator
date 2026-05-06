@@ -368,8 +368,58 @@ public static class SecurityRoleWriter
     }
 
     /// <summary>
-    /// Delete a security role by name. Finds and deletes all BU copies
-    /// (root + inherited child copies) to avoid orphan copies.
+    /// Remove specific privileges from a security role. Only the listed privileges
+    /// are removed; all other privileges on the role are left untouched.
+    /// </summary>
+    public static void RemovePrivileges(
+        IOrganizationService service,
+        SecurityRolePrivilegeRemoveDefinition def,
+        Action<string>? log = null)
+    {
+        var roleId = FindRoleByName(service, def.RoleName)
+            ?? throw new InvalidOperationException($"Role '{def.RoleName}' not found.");
+
+        log?.Invoke($"Found role '{def.RoleName}' ({roleId})");
+
+        var privilegeIds = new List<Guid>();
+        foreach (var priv in def.Privileges)
+        {
+            var privilegeId = ResolvePrivilege(service, priv.Access, priv.Entity, log);
+            if (privilegeId == null)
+            {
+                log?.Invoke($"  WARNING: Privilege '{priv.Access}' on '{priv.Entity}' not found — skipping");
+                continue;
+            }
+            privilegeIds.Add(privilegeId.Value);
+            log?.Invoke($"  Remove {priv.Access} on {priv.Entity} → privilege {privilegeId.Value}");
+        }
+
+        if (privilegeIds.Count == 0)
+        {
+            log?.Invoke("No valid privileges to remove.");
+            return;
+        }
+
+        // RemovePrivilegeRoleRequest takes one privilege at a time
+        foreach (var privId in privilegeIds)
+        {
+            try
+            {
+                service.Execute(new RemovePrivilegeRoleRequest { RoleId = roleId, PrivilegeId = privId });
+                log?.Invoke($"  Removed privilege {privId} OK.");
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to remove privilege {privId} from role '{def.RoleName}': {ex.Detail.Message}", ex);
+            }
+        }
+        log?.Invoke($"  Removed {privilegeIds.Count} privilege(s) from role '{def.RoleName}'.");
+    }
+
+    /// <summary>
+    /// Delete a security role by name. Only deletes the root BU copy (parentroleid = null);
+    /// Dataverse automatically removes all child-BU inherited copies.
     /// Logs a warning and returns if the role is not found.
     /// </summary>
     public static void DeleteRole(
@@ -377,35 +427,39 @@ public static class SecurityRoleWriter
         SecurityRoleDeleteDefinition def,
         Action<string>? log = null)
     {
+        // Only delete the root BU copy — Dataverse rejects Delete on inherited child copies
         var query = new QueryExpression("role")
         {
             ColumnSet = new ColumnSet("roleid", "name"),
             Criteria = new FilterExpression
             {
-                Conditions = { new ConditionExpression("name", ConditionOperator.Equal, def.RoleName) }
-            }
+                Conditions =
+                {
+                    new ConditionExpression("name", ConditionOperator.Equal, def.RoleName),
+                    new ConditionExpression("parentroleid", ConditionOperator.Null),
+                }
+            },
+            TopCount = 1
         };
 
         var results = service.RetrieveMultiple(query);
         if (results.Entities.Count == 0)
         {
-            log?.Invoke($"Role '{def.RoleName}' not found — nothing to delete.");
+            log?.Invoke($"Role '{def.RoleName}' not found (root BU copy) — nothing to delete.");
             return;
         }
 
-        foreach (var role in results.Entities)
+        var roleId = results.Entities[0].Id;
+        log?.Invoke($"Deleting root role '{def.RoleName}' ({roleId})");
+        try
         {
-            log?.Invoke($"Deleting role '{def.RoleName}' ({role.Id})");
-            try
-            {
-                service.Delete("role", role.Id);
-                log?.Invoke($"  Deleted OK.");
-            }
-            catch (FaultException<OrganizationServiceFault> ex)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to delete role '{def.RoleName}' ({role.Id}): {ex.Detail.Message}", ex);
-            }
+            service.Delete("role", roleId);
+            log?.Invoke($"  Deleted OK.");
+        }
+        catch (FaultException<OrganizationServiceFault> ex)
+        {
+            throw new InvalidOperationException(
+                $"Failed to delete role '{def.RoleName}' ({roleId}): {ex.Detail.Message}", ex);
         }
     }
 

@@ -35,13 +35,35 @@ public static class EntityWriter
             var metadata = BuildAttributeMetadata(attr, entityLogicalName, baseLcid);
             if (metadata == null) continue;
 
-            var request = new UpdateAttributeRequest
+            service.Execute(new UpdateAttributeRequest
             {
                 EntityName = entityLogicalName,
                 Attribute = metadata
-            };
+            });
 
-            service.Execute(request);
+            // UpdateAttributeRequest ignores OptionSet labels on existing attributes.
+            // Send UpdateOptionValueRequest for each option whose label changed.
+            if (OptionsChanged(attr.Options, original.Options) && attr.Options != null)
+            {
+                var originalByValue = original.Options?
+                    .ToDictionary(o => o.Value) ?? [];
+
+                foreach (var opt in attr.Options)
+                {
+                    if (originalByValue.TryGetValue(opt.Value, out var orig) && orig.Label == opt.Label)
+                        continue;
+
+                    service.Execute(new UpdateOptionValueRequest
+                    {
+                        EntityLogicalName = entityLogicalName,
+                        AttributeLogicalName = attr.LogicalName,
+                        Value = opt.Value,
+                        Label = new Label(opt.Label, baseLcid),
+                        MergeLabels = false
+                    });
+                }
+            }
+
             changes.Add(attr.LogicalName);
         }
 
@@ -197,6 +219,51 @@ public static class EntityWriter
             return new Label();
 
         return new Label(text, lcid);
+    }
+
+    /// <summary>
+    /// Returns a human-readable description of each attribute that would change, without touching CRM.
+    /// Used to build the commit selection UI label.
+    /// </summary>
+    public static List<string> GetChangeSummary(EntityDefinition pending, EntityDefinition snapshot)
+    {
+        var summaries = new List<string>();
+        var snapshotLookup = snapshot.Attributes
+            .Where(a => a.IsCustomField)
+            .ToDictionary(a => a.LogicalName, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var attr in pending.Attributes.Where(a => a.IsCustomField))
+        {
+            if (!snapshotLookup.TryGetValue(attr.LogicalName, out var original))
+                continue;
+            if (!HasChanges(attr, original))
+                continue;
+
+            var parts = new List<string>();
+
+            if (attr.DisplayName != original.DisplayName)
+                parts.Add($"display \"{original.DisplayName}\"→\"{attr.DisplayName}\"");
+            if (attr.RequiredLevel != original.RequiredLevel)
+                parts.Add($"required: {original.RequiredLevel ?? "none"}→{attr.RequiredLevel ?? "none"}");
+            if (attr.MaxLength != original.MaxLength)
+                parts.Add($"maxLength: {original.MaxLength}→{attr.MaxLength}");
+            if (OptionsChanged(attr.Options, original.Options) && attr.Options != null && original.Options != null)
+            {
+                var pendingByValue = attr.Options.ToDictionary(o => o.Value);
+                var labelChanges = original.Options
+                    .Where(o => pendingByValue.TryGetValue(o.Value, out var p) && p.Label != o.Label)
+                    .Select(o => $"{o.Label}→{pendingByValue[o.Value].Label}")
+                    .ToList();
+                if (labelChanges.Count > 0)
+                    parts.Add($"options: {string.Join(", ", labelChanges)}");
+            }
+
+            summaries.Add(parts.Count > 0
+                ? $"{attr.LogicalName}: {string.Join("; ", parts)}"
+                : attr.LogicalName);
+        }
+
+        return summaries;
     }
 
     public static void PublishAll(IOrganizationService service)

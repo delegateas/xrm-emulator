@@ -160,6 +160,11 @@ try
     {
         HandlePluginCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("environment-variable", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("add", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleEnvironmentVariableAddCommand(positionalArgs, args);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("customapi", StringComparison.OrdinalIgnoreCase))
     {
         await HandleCustomApiCommand(positionalArgs, args, configuration, noCache);
@@ -197,6 +202,11 @@ try
     {
         HandleSolutionAddComponentCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("solution", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("copy-components", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleSolutionCopyComponentsCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("sla", StringComparison.OrdinalIgnoreCase))
     {
         await HandleSlaCommand(positionalArgs, args, configuration, noCache);
@@ -224,6 +234,22 @@ try
     else if (positionalArgs.Length >= 1 && positionalArgs[0].Equals("git-init", StringComparison.OrdinalIgnoreCase))
     {
         HandleGitInitCommand();
+    }
+    else if (positionalArgs.Length > 0)
+    {
+        // Unknown command — print a correction hint before falling through.
+        AnsiConsole.MarkupLine($"[red]Unknown command:[/] [bold]{positionalArgs[0]}[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Common commands use the form [bold]<noun> <verb>[/], not [bold]<verb> <noun>[/]. For example:[/]");
+        AnsiConsole.MarkupLine("  [bold]webresource checkout[/] <name>");
+        AnsiConsole.MarkupLine("  [bold]forms[/] <guid>");
+        AnsiConsole.MarkupLine("  [bold]views[/] <guid>");
+        AnsiConsole.MarkupLine("  [bold]entity[/] <logicalname>");
+        AnsiConsole.MarkupLine("  [bold]commit[/]");
+        AnsiConsole.MarkupLine("  [bold]pending[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Run with [bold]--help[/] for the full command list.[/]");
+        Environment.Exit(1);
     }
     else
     {
@@ -2105,6 +2131,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]deprecate[/] <entity> <attribute>                       Deprecate a field (prefix display name with ZZ)");
     AnsiConsole.MarkupLine("  [bold]optionset add-value[/] <name> <label> [[--value <int>]]  Add a value to a global option set");
     AnsiConsole.MarkupLine("  [bold]entity statusvalue add[/] <entity> <label> --state <c> [[--value <int>]]  Add a statuscode value to an entity");
+    AnsiConsole.MarkupLine("  [bold]environment-variable add[/] <schema-name> --display-name \"<n>\" [[--type String|Number|Boolean|JSON|Secret]] [[--default-value \"<v>\"]]  Stage a new environment variable");
     AnsiConsole.MarkupLine("  [bold]delete[/] <entity> <guid> [[--cascade]]                Delete a record (--cascade removes restrict-delete children first)");
     AnsiConsole.MarkupLine("  [bold]user access[/] <id|email|name> [[--json]]             List a user's direct roles, team memberships, and team-granted roles");
     AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
@@ -3544,9 +3571,166 @@ static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] 
         fileName = $"form_{formIdStr}.solutioncomponent.json";
         displayLine = $"  Form GUID:  {formIdStr}";
     }
+    else if (componentType == "entity")
+    {
+        var entityLogicalName = ParseNamedArg(allArgs, "--entity");
+        if (string.IsNullOrEmpty(entityLogicalName)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = entityLogicalName!.ToLowerInvariant(),
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = entityLogicalName,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"entity_{entityLogicalName}.solutioncomponent.json";
+        displayLine = $"  Entity:     {entityLogicalName}";
+    }
+    else if (componentType == "relationship")
+    {
+        var schemaName = ParseNamedArg(allArgs, "--relationship");
+        if (string.IsNullOrEmpty(schemaName)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = schemaName!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = schemaName,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"relationship_{schemaName}.solutioncomponent.json";
+        displayLine = $"  Relationship: {schemaName}";
+    }
+    else if (componentType == "view")
+    {
+        var viewIdRaw = ParseNamedArg(allArgs, "--view");
+        if (string.IsNullOrEmpty(viewIdRaw) || !Guid.TryParse(viewIdRaw.Trim('{', '}'), out var viewId))
+        {
+            PrintSolutionAddComponentUsage();
+            Environment.Exit(1);
+            return;
+        }
+        var viewIdStr = viewId.ToString().ToLowerInvariant();
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = "savedquery",
+            AttributeLogicalName = viewIdStr,
+            ComponentType = componentType,
+            DisplayName = $"View {viewIdStr}",
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"view_{viewIdStr}.solutioncomponent.json";
+        displayLine = $"  View GUID:  {viewIdStr}";
+    }
+    else if (componentType == "optionset")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!.ToLowerInvariant(),
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"optionset_{name}.solutioncomponent.json";
+        displayLine = $"  Option set: {name}";
+    }
+    else if (componentType == "webresource")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"webresource_{name}.solutioncomponent.json";
+        displayLine = $"  Web resource: {name}";
+    }
+    else if (componentType == "securityrole")
+    {
+        var name = ParseNamedArg(allArgs, "--role");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"securityrole_{name}.solutioncomponent.json";
+        displayLine = $"  Security role: {name}";
+    }
+    else if (componentType == "customapi")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"customapi_{name}.solutioncomponent.json";
+        displayLine = $"  Custom API: {name}";
+    }
+    else if (componentType == "appaction")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"appaction_{name}.solutioncomponent.json";
+        displayLine = $"  App action: {name}";
+    }
+    else if (componentType == "environmentvariable")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"environmentvariable_{name}.solutioncomponent.json";
+        displayLine = $"  Env variable: {name}";
+    }
+    else if (componentType == "appmodule")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"appmodule_{name}.solutioncomponent.json";
+        displayLine = $"  App module: {name}";
+    }
     else
     {
-        AnsiConsole.MarkupLine($"[red]Unsupported solution component type: {componentType}.[/] Supported: attribute, form.");
+        AnsiConsole.MarkupLine($"[red]Unsupported solution component type: {componentType}.[/]");
+        AnsiConsole.MarkupLine("Supported: attribute, form, entity, relationship, view, optionset, webresource, securityrole, customapi, appaction, environmentvariable, appmodule");
         Environment.Exit(1);
         return;
     }
@@ -3570,16 +3754,226 @@ static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] 
     AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to add to solution.[/]");
 }
 
+// ──────────────────────────────────────────────────────────────
+// solution copy-components --from <source-solution> --to <target-solution>
+// Queries CRM live; stages all components in source but not in target.
+// ──────────────────────────────────────────────────────────────
+static async Task HandleSolutionCopyComponentsCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]solution copy-components[/] — stage components missing from target solution");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[yellow]Usage:[/]");
+        AnsiConsole.MarkupLine("  solution copy-components --from <source-unique-name> --to <target-unique-name>");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Queries CRM for all components in the source solution, compares against the target,");
+        AnsiConsole.MarkupLine("and stages .directsolutioncomponent.json files for every component present in source but");
+        AnsiConsole.MarkupLine("absent from target. Clears existing pending SolutionComponents first.[/]");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Example:[/]");
+        AnsiConsole.MarkupLine("[grey]  solution copy-components --from PartnerHierarki --to KFSales[/]");
+        Environment.Exit(0);
+        return;
+    }
+
+    var fromSolution = ParseNamedArg(allArgs, "--from");
+    var toSolution = ParseNamedArg(allArgs, "--to");
+
+    if (string.IsNullOrEmpty(fromSolution) || string.IsNullOrEmpty(toSolution))
+    {
+        AnsiConsole.MarkupLine("[red]Error:[/] --from and --to are required.");
+        AnsiConsole.MarkupLine("  solution copy-components --from <source-unique-name> --to <target-unique-name>");
+        Environment.Exit(1);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SolutionComponents");
+
+    var metadata = ReadConnectionMetadata(metadataPath);
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    // Resolve solution GUIDs
+    Guid ResolveSolutionId(string uniqueName)
+    {
+        var q = new Microsoft.Xrm.Sdk.Query.QueryExpression("solution")
+        {
+            ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("solutionid", "uniquename"),
+            TopCount = 1,
+            Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+            {
+                Conditions =
+                {
+                    new Microsoft.Xrm.Sdk.Query.ConditionExpression("uniquename",
+                        Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, uniqueName)
+                }
+            }
+        };
+        var results = client.RetrieveMultiple(q);
+        if (results.Entities.Count == 0)
+            throw new InvalidOperationException($"Solution '{uniqueName}' not found in CRM.");
+        return results.Entities[0].Id;
+    }
+
+    AnsiConsole.MarkupLine($"[grey]Resolving solution IDs...[/]");
+    var fromId = ResolveSolutionId(fromSolution);
+    var toId = ResolveSolutionId(toSolution);
+    AnsiConsole.MarkupLine($"[grey]  {fromSolution}: {fromId}[/]");
+    AnsiConsole.MarkupLine($"[grey]  {toSolution}:   {toId}[/]");
+
+    // Query all solutioncomponent records for a solution
+    HashSet<(int type, Guid objectId)> GetComponents(Guid solutionId)
+    {
+        var q = new Microsoft.Xrm.Sdk.Query.QueryExpression("solutioncomponent")
+        {
+            ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("componenttype", "objectid"),
+            Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+            {
+                Conditions =
+                {
+                    new Microsoft.Xrm.Sdk.Query.ConditionExpression("solutionid",
+                        Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, solutionId),
+                    new Microsoft.Xrm.Sdk.Query.ConditionExpression("objectid",
+                        Microsoft.Xrm.Sdk.Query.ConditionOperator.NotNull)
+                }
+            }
+        };
+        var result = new HashSet<(int, Guid)>();
+        var page = client.RetrieveMultiple(q);
+        foreach (var e in page.Entities)
+        {
+            var ct = e.GetAttributeValue<Microsoft.Xrm.Sdk.OptionSetValue>("componenttype")?.Value;
+            var oid = e.GetAttributeValue<Guid?>("objectid");
+            if (ct.HasValue && oid.HasValue && oid.Value != Guid.Empty)
+                result.Add((ct.Value, oid.Value));
+        }
+        return result;
+    }
+
+    AnsiConsole.MarkupLine($"[grey]Loading components from {fromSolution}...[/]");
+    var sourceComponents = GetComponents(fromId);
+    AnsiConsole.MarkupLine($"[grey]  {sourceComponents.Count} components found.[/]");
+
+    AnsiConsole.MarkupLine($"[grey]Loading components from {toSolution}...[/]");
+    var targetComponents = GetComponents(toId);
+    AnsiConsole.MarkupLine($"[grey]  {targetComponents.Count} components found.[/]");
+
+    var missing = sourceComponents.Except(targetComponents).OrderBy(c => c.type).ThenBy(c => c.objectId).ToList();
+    AnsiConsole.MarkupLine($"[yellow]{missing.Count}[/] components in [cyan]{fromSolution}[/] not in [cyan]{toSolution}[/].");
+
+    if (missing.Count == 0)
+    {
+        AnsiConsole.MarkupLine("[green]Nothing to stage — target already contains all source components.[/]");
+        return;
+    }
+
+    // Clear existing pending SolutionComponents
+    if (Directory.Exists(pendingDir))
+    {
+        var existing = Directory.GetFiles(pendingDir, "*.directsolutioncomponent.json");
+        if (existing.Length > 0)
+        {
+            AnsiConsole.MarkupLine($"[grey]Clearing {existing.Length} existing .directsolutioncomponent.json files...[/]");
+            foreach (var f in existing) File.Delete(f);
+        }
+    }
+    else
+    {
+        Directory.CreateDirectory(pendingDir);
+    }
+
+    // Map of known componenttype integers to readable names (for display only)
+    var typeNames = new Dictionary<int, string>
+    {
+        [1] = "entity", [2] = "attribute", [3] = "relationship", [4] = "attributemap", [5] = "entitymap",
+        [6] = "privilege", [7] = "privilegeobjtypcodes", [8] = "index", [9] = "role", [10] = "rolePrivilege",
+        [11] = "displayString", [12] = "displayStringmap", [13] = "form", [14] = "organization",
+        [16] = "systemform", [17] = "attributemap2", [20] = "rolePrivilege2", [21] = "entityrelationship",
+        [22] = "entityrelationshiprole", [23] = "entityrelationshiprelationship", [24] = "managedproperty",
+        [25] = "entitykey", [26] = "savedquery", [29] = "workflow", [31] = "report",
+        [33] = "reportentity", [34] = "reportcategory", [35] = "reportvisibility", [36] = "attachment",
+        [37] = "emailtemplate", [38] = "contracttemplate", [39] = "kbarticletemplate", [40] = "mailmergetemplate",
+        [44] = "duplicaterule", [45] = "duplicaterulecondition", [46] = "entitymap2", [47] = "attributemap3",
+        [48] = "ribboncommand", [49] = "ribboncontextgroup", [50] = "ribbondiff",
+        [52] = "ribbonrule", [53] = "ribbontabtocommandmap", [55] = "ribboncustomaction",
+        [59] = "optionset", [60] = "entityrelationshiprole2", [61] = "webresource",
+        [62] = "sitemapnode", [63] = "connectionrole", [64] = "complexcontrol",
+        [65] = "hierarchyrule", [66] = "customcontrol", [68] = "customcontroldefaultconfig",
+        [70] = "entityanalyticsconfig", [71] = "attribute2", [80] = "appmodule",
+        [90] = "appmoduleroles", [91] = "plugintype", [92] = "pluginstep",
+        [93] = "pluginstepimage", [95] = "serviceendpoint", [150] = "routingrule",
+        [151] = "routingrulecondition", [152] = "sla", [153] = "slaitem",
+        [154] = "convertaction", [155] = "kbarticlecomment", [158] = "hierarchyrule2",
+        [159] = "mobileofflineprofile", [161] = "mobileofflineprofileitem",
+        [165] = "similarityrule", [166] = "dataperformance", [201] = "sdkmessageprocessingstep",
+        [372] = "environmentvariabledefinition", [373] = "environmentvariablevalue",
+        [380] = "environmentvariable",
+        [400] = "aipluginoperationresponsetemplate", [430] = "aimodel",
+        [10004] = "customapi", [10005] = "customapirequestparameter", [10006] = "customapiresponseproperty",
+        [10082] = "appaction"
+    };
+
+    // Stage pending files
+    var jsonOptions = new System.Text.Json.JsonSerializerOptions
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
+
+    int staged = 0;
+    foreach (var (ct, oid) in missing)
+    {
+        var typeName = typeNames.TryGetValue(ct, out var tn) ? tn : $"type{ct}";
+        var displayName = $"{typeName} {oid}";
+
+        var def = new XrmEmulator.MetadataSync.Models.DirectSolutionComponentDefinition
+        {
+            ComponentType = ct,
+            ComponentId = oid,
+            SolutionUniqueName = toSolution,
+            DisplayName = displayName
+        };
+
+        var fileName = $"{typeName}_{oid}.directsolutioncomponent.json";
+        var destPath = Path.Combine(pendingDir, fileName);
+        File.WriteAllText(destPath, System.Text.Json.JsonSerializer.Serialize(def, jsonOptions));
+        staged++;
+    }
+
+    AnsiConsole.MarkupLine($"[green]Staged {staged} component(s)[/] to [grey]{pendingDir}[/]");
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to add all to solution.[/]");
+}
+
 static void PrintSolutionAddComponentUsage()
 {
     AnsiConsole.MarkupLine("[red]Usage:[/]");
-    AnsiConsole.MarkupLine("  solution add-component --type attribute --entity <entity> --attribute <attr>");
-    AnsiConsole.MarkupLine("  solution add-component --type form      --form <form-guid>");
+    AnsiConsole.MarkupLine("  solution add-component --type attribute         --entity <entity> --attribute <attr>");
+    AnsiConsole.MarkupLine("  solution add-component --type form              --form <guid>");
+    AnsiConsole.MarkupLine("  solution add-component --type entity            --entity <logical-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type relationship      --relationship <schema-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type view              --view <guid>");
+    AnsiConsole.MarkupLine("  solution add-component --type optionset         --name <name>");
+    AnsiConsole.MarkupLine("  solution add-component --type webresource       --name <name>");
+    AnsiConsole.MarkupLine("  solution add-component --type securityrole      --role <name>");
+    AnsiConsole.MarkupLine("  solution add-component --type customapi         --name <unique-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type appaction         --name <unique-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type environmentvariable --name <schema-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type appmodule         --name <unique-name>");
     AnsiConsole.MarkupLine("");
     AnsiConsole.MarkupLine("[grey]Adds an existing component (created in another solution) to this solution.[/]");
     AnsiConsole.MarkupLine("[grey]Examples:[/]");
     AnsiConsole.MarkupLine("[grey]  solution add-component --type attribute --entity lead --attribute kf_existingcustomer[/]");
     AnsiConsole.MarkupLine("[grey]  solution add-component --type form --form 6e77626b-e693-44f0-a1c7-359b1a7a9a4c[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type entity --entity kf_leaddistributionregion[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type optionset --name kf_yesnoinherited[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type securityrole --role Partner_Manager[/]");
+    AnsiConsole.MarkupLine("[grey]  solution add-component --type webresource --name kf_partner_form.js[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -4022,6 +4416,9 @@ static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
         case "delete":
             HandleSecurityRoleDeleteCommand(positionalArgs);
             break;
+        case "remove-privilege":
+            HandleSecurityRoleRemovePrivilegeCommand(positionalArgs);
+            break;
         default:
             PrintSecurityRoleUsage();
             Environment.Exit(1);
@@ -4208,6 +4605,69 @@ static void PrintSecurityRoleUsage()
     AnsiConsole.MarkupLine("  [yellow]delete[/] <role-name>");
     AnsiConsole.MarkupLine("    Stage deletion of a security role from CRM (all BU copies removed).");
     AnsiConsole.MarkupLine("    [grey]Example: security-role delete \"_Role_AppUser_KF-Integration\"[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]remove-privilege[/] <role-name> <entity> <access> [depth]");
+    AnsiConsole.MarkupLine("    Remove a specific privilege from a role. Other privileges are untouched.");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role remove-privilege \"_Role_SalesData_Owner\" kf_partnerformresponse Create Global[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// security-role remove-privilege <role-name> <entity> <access> [depth]
+// ──────────────────────────────────────────────────────────────
+static void HandleSecurityRoleRemovePrivilegeCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 5)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] security-role remove-privilege <role-name> <entity> <access> [depth]");
+        AnsiConsole.MarkupLine("[grey]Example: security-role remove-privilege \"_Role_SalesData_Owner\" kf_partnerformresponse Create Global[/]");
+        Environment.Exit(1);
+    }
+
+    var roleName = positionalArgs[2];
+    var entity = positionalArgs[3].ToLowerInvariant();
+    var access = positionalArgs[4];
+    var depth = positionalArgs.Length > 5 ? positionalArgs[5] : "Global";
+
+    var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share", "merge" };
+    if (!validAccess.Contains(access.ToLowerInvariant()))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid access type:[/] '{access}'. Valid: {string.Join(", ", validAccess.Select(a => char.ToUpper(a[0]) + a[1..]))}");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "SecurityRolePrivilegeRemovals");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = roleName.Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.securityroleprivremove.json");
+
+    // Merge with existing pending file if present
+    var privileges = new List<PrivilegeEntry>();
+    if (File.Exists(destPath))
+    {
+        var existing = JsonSerializer.Deserialize<SecurityRolePrivilegeRemoveDefinition>(
+            File.ReadAllText(destPath),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
+        if (existing != null)
+            privileges.AddRange(existing.Privileges);
+    }
+
+    privileges.Add(new PrivilegeEntry { Entity = entity, Access = access, Depth = depth });
+
+    var def = new SecurityRolePrivilegeRemoveDefinition { RoleName = roleName, Privileges = privileges };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged privilege removal:[/] {access} on {entity} from '{roleName}'");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine($"[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -5408,6 +5868,84 @@ static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
 }
 
 // ──────────────────────────────────────────────────────────────
+// environment-variable add <schema> -- stage a new env var in _pending/
+// ──────────────────────────────────────────────────────────────
+static void HandleEnvironmentVariableAddCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] environment-variable add <schema-name> --display-name \"<name>\" [[--type String]] [[--default-value \"<v>\"]]");
+        AnsiConsole.MarkupLine("[grey]Example: environment-variable add kf_DefaultKFAccessTeamId --display-name \"Standard adgangsteam – KF\" --type String --default-value \"18cb1951-b7c9-f011-bbd2-6045bddd9a1b\"[/]");
+        Environment.Exit(1);
+    }
+
+    var schemaName = positionalArgs[2];
+    var displayName = ParseNamedArg(allArgs, "--display-name");
+    var type = ParseNamedArg(allArgs, "--type") ?? "String";
+    var defaultValue = ParseNamedArg(allArgs, "--default-value") ?? "";
+
+    if (string.IsNullOrWhiteSpace(displayName))
+    {
+        AnsiConsole.MarkupLine("[red]--display-name is required.[/]");
+        Environment.Exit(1);
+    }
+
+    var validTypes = new[] { "String", "Number", "Boolean", "JSON", "DataSource", "Secret" };
+    if (!validTypes.Contains(type, StringComparer.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine($"[red]Unknown type '{type}'. Valid types: {string.Join(", ", validTypes)}[/]");
+        Environment.Exit(1);
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    // Read solution unique name from Solution.xml
+    var solutionFolder = GetSolutionFolder(solutionExportDir);
+    var solutionXmlPath = Path.Combine(solutionFolder, "Other", "Solution.xml");
+    var solDoc = System.Xml.Linq.XDocument.Parse(File.ReadAllText(solutionXmlPath));
+    var solutionUniqueName = solDoc.Descendants("UniqueName").FirstOrDefault()?.Value
+        ?? throw new InvalidOperationException("Cannot find solution UniqueName in Solution.xml");
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "EnvironmentVariables");
+    Directory.CreateDirectory(pendingDir);
+
+    var definition = new EnvironmentVariableFileDefinition
+    {
+        SolutionUniqueName = solutionUniqueName,
+        Variables =
+        [
+            new EnvironmentVariableEntry
+            {
+                SchemaName   = schemaName,
+                DisplayName  = displayName,
+                Type         = type,
+                DefaultValue = defaultValue,
+                CurrentValue = null,
+            }
+        ]
+    };
+
+    var destPath = Path.Combine(pendingDir, $"{schemaName}.envvar.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Environment variable staged:[/]");
+    AnsiConsole.MarkupLine($"  Schema:   {schemaName}");
+    AnsiConsole.MarkupLine($"  Display:  {displayName}");
+    AnsiConsole.MarkupLine($"  Type:     {type}");
+    AnsiConsole.MarkupLine($"  Default:  {(string.IsNullOrEmpty(defaultValue) ? "(empty)" : defaultValue)}");
+    AnsiConsole.MarkupLine($"  Solution: {solutionUniqueName}");
+    AnsiConsole.MarkupLine($"  File:     {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the file if needed, then run [blue]commit[/] to push to CRM.[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
 // deprecate <entity> <attribute> — mark a field as deprecated
 // ──────────────────────────────────────────────────────────────
 static void HandleDeprecateCommand(string[] positionalArgs, string[] allArgs)
@@ -6290,6 +6828,16 @@ static void HandlePendingCommand()
         items.Add(("Delete Role", parsed.RoleName, Path.GetRelativePath(pendingDir, f)));
     }
 
+    var pendingSecurityRolePrivRemoveFiles = Directory.GetFiles(pendingDir, "*.securityroleprivremove.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingSecurityRolePrivRemoveFiles)
+    {
+        var parsed = JsonSerializer.Deserialize<SecurityRolePrivilegeRemoveDefinition>(File.ReadAllText(f),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+        items.Add(("Remove Privileges", $"{parsed.RoleName} ({parsed.Privileges.Count} privilege(s))", Path.GetRelativePath(pendingDir, f)));
+    }
+
     var pendingSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.solutioncomponent.json", SearchOption.AllDirectories)
         .ToList();
 
@@ -6579,6 +7127,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
             || item.Type == CommitItemType.RelationshipUpdate
             || item.Type == CommitItemType.SecurityRoleUpdate
             || item.Type == CommitItemType.SecurityRoleDelete
+            || item.Type == CommitItemType.SecurityRolePrivilegeRemove
             || item.Type == CommitItemType.DataImport
             || isNewView || isNewForm || isNewBusinessRule)
         {
@@ -6725,6 +7274,20 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
         AnsiConsole.MarkupLine($"[grey]Last synced: {existingMetadata.SyncedAt:u}[/]");
         AnsiConsole.MarkupLine($"[grey]Output: {existingBaseDir}[/]");
         AnsiConsole.WriteLine();
+
+        if (Console.IsInputRedirected)
+        {
+            AnsiConsole.MarkupLine("[yellow]Non-interactive mode detected — cannot prompt for resync.[/]");
+            AnsiConsole.MarkupLine("[grey]To trigger a full re-export run this command in a terminal (no arguments).[/]");
+            AnsiConsole.MarkupLine("[grey]If you meant to run a subcommand, use the correct form, e.g.:[/]");
+            AnsiConsole.MarkupLine("  [bold]webresource checkout[/] <name>");
+            AnsiConsole.MarkupLine("  [bold]forms[/] <guid>");
+            AnsiConsole.MarkupLine("  [bold]views[/] <guid>");
+            AnsiConsole.MarkupLine("  [bold]entity[/] <logicalname>");
+            AnsiConsole.MarkupLine("  [bold]commit[/]");
+            AnsiConsole.MarkupLine("  [bold]pending[/]");
+            Environment.Exit(1);
+        }
 
         if (AnsiConsole.Confirm($"Re-export [green]{existingMetadata.Solution.UniqueName}[/]?"))
         {

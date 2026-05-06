@@ -34,6 +34,7 @@ public enum CommitItemType
     OptionSetValue,
     StatusValue,
     AddSolutionComponent,
+    AddDirectSolutionComponent,
     EnableChangeTracking,
     CustomApiRegistration,
     SlaItem,
@@ -41,7 +42,8 @@ public enum CommitItemType
     RelationshipDelete,
     EntityMetadataDelete,
     EnvironmentVariable,
-    SecurityRoleDelete
+    SecurityRoleDelete,
+    SecurityRolePrivilegeRemove
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

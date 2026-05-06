@@ -103,7 +103,10 @@ public static class EntityFileReader
         var optionSet = attr.Element("optionset");
         if (optionSet == null) return options;
 
-        foreach (var opt in optionSet.Elements("option"))
+        var optionElements = optionSet.Element("options")?.Elements("option")
+            ?? optionSet.Elements("option");
+
+        foreach (var opt in optionElements)
         {
             var valueStr = opt.Attribute("value")?.Value;
             if (valueStr == null || !int.TryParse(valueStr, out var value)) continue;

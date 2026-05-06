@@ -113,8 +113,8 @@ public static class CommitPipeline
         foreach (var f in pendingEntityFiles)
         {
             var parsed = EntityFileReader.Parse(f);
-            var customCount = parsed.Attributes.Count(a => a.IsCustomField);
-            commitItems.Add(new CommitItem(CommitItemType.Entity, $"Entity: {parsed.DisplayName} ({customCount} custom fields)", f, parsed));
+            var label = BuildEntityLabel(parsed, f, pendingDir);
+            commitItems.Add(new CommitItem(CommitItemType.Entity, label, f, parsed));
         }
 
         foreach (var f in pendingIconFiles)
@@ -400,6 +400,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Security role privilege removals
+        var pendingSecurityRolePrivilegeRemoveFiles = Directory.GetFiles(pendingDir, "*.securityroleprivremove.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingSecurityRolePrivilegeRemoveFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<SecurityRolePrivilegeRemoveDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.SecurityRolePrivilegeRemove,
+                $"Remove Privileges: {parsed.RoleName} ({parsed.Privileges.Count} privilege(s))",
+                f, parsed));
+        }
+
         // Environment variables (definition + current value upsert)
         var pendingEnvVarFiles = Directory.GetFiles(pendingDir, "*.envvar.json", SearchOption.AllDirectories)
             .ToList();
@@ -599,6 +612,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Direct solution component additions (GUIDs resolved from live CRM by copy-components command)
+        var pendingDirectSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.directsolutioncomponent.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingDirectSolutionComponentFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<DirectSolutionComponentDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.AddDirectSolutionComponent,
+                $"Add to Solution: {parsed.DisplayName ?? $"type{parsed.ComponentType} {parsed.ComponentId}"} → {parsed.SolutionUniqueName}",
+                f, parsed));
+        }
+
         // Enable change tracking
         var pendingChangeTrackingFiles = Directory.GetFiles(pendingDir, "*.enablechangetracking.json", SearchOption.AllDirectories)
             .ToList();
@@ -636,6 +662,7 @@ public static class CommitPipeline
             [CommitItemType.NewEntity] = 0,
             [CommitItemType.NewAttribute] = 1,
             [CommitItemType.AddSolutionComponent] = 2,
+            [CommitItemType.AddDirectSolutionComponent] = 2,
             [CommitItemType.Entity] = 2,
             [CommitItemType.StatusValue] = 2,
             [CommitItemType.NewManyToManyRelationship] = 2, // After entities exist, before views/forms reference them
@@ -672,6 +699,7 @@ public static class CommitPipeline
             [CommitItemType.EnableChangeTracking] = 2,
             [CommitItemType.EnvironmentVariable] = 20, // After entities/attributes are in place
             [CommitItemType.SecurityRoleDelete] = 18, // After role assignments are cleaned up
+            [CommitItemType.SecurityRolePrivilegeRemove] = 3, // Same phase as SecurityRoleUpdate
         };
         commitItems.Sort((a, b) =>
         {
@@ -1788,17 +1816,214 @@ public static class CommitPipeline
                             var addReq = new AddSolutionComponentRequest
                             {
                                 ComponentType = 24, // SystemForm
-                                ComponentId = Guid.Parse(def.AttributeLogicalName), // Reusing field for the form GUID
+                                ComponentId = Guid.Parse(def.AttributeLogicalName),
                                 SolutionUniqueName = def.SolutionUniqueName,
                                 AddRequiredComponents = false
                             };
                             client.Execute(addReq);
                             log?.Invoke($"  Form added to solution {def.SolutionUniqueName}. FormId: {def.AttributeLogicalName}");
                         }
+                        else if (def.ComponentType.Equals("entity", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var resp = (RetrieveEntityResponse)client.Execute(new RetrieveEntityRequest
+                            {
+                                LogicalName = def.EntityLogicalName,
+                                EntityFilters = Microsoft.Xrm.Sdk.Metadata.EntityFilters.Entity,
+                                RetrieveAsIfPublished = true
+                            });
+                            var metadataId = resp.EntityMetadata.MetadataId
+                                ?? throw new InvalidOperationException($"Entity {def.EntityLogicalName} has no MetadataId");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 1, // Entity
+                                ComponentId = metadataId,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Entity {def.EntityLogicalName} added to solution {def.SolutionUniqueName}. MetadataId: {metadataId}");
+                        }
+                        else if (def.ComponentType.Equals("relationship", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var resp = (RetrieveRelationshipResponse)client.Execute(new RetrieveRelationshipRequest
+                            {
+                                Name = def.EntityLogicalName,
+                                RetrieveAsIfPublished = true
+                            });
+                            var metadataId = resp.RelationshipMetadata.MetadataId
+                                ?? throw new InvalidOperationException($"Relationship {def.EntityLogicalName} has no MetadataId");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 10, // Relationship
+                                ComponentId = metadataId,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Relationship {def.EntityLogicalName} added to solution {def.SolutionUniqueName}. MetadataId: {metadataId}");
+                        }
+                        else if (def.ComponentType.Equals("view", StringComparison.OrdinalIgnoreCase))
+                        {
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 26, // SavedQuery
+                                ComponentId = Guid.Parse(def.AttributeLogicalName),
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  View {def.AttributeLogicalName} added to solution {def.SolutionUniqueName}.");
+                        }
+                        else if (def.ComponentType.Equals("optionset", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var resp = (RetrieveOptionSetResponse)client.Execute(new RetrieveOptionSetRequest
+                            {
+                                Name = def.EntityLogicalName,
+                                RetrieveAsIfPublished = true
+                            });
+                            var metadataId = resp.OptionSetMetadata.MetadataId
+                                ?? throw new InvalidOperationException($"Option set {def.EntityLogicalName} has no MetadataId");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 59, // GlobalOptionSet
+                                ComponentId = metadataId,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Option set {def.EntityLogicalName} added to solution {def.SolutionUniqueName}. MetadataId: {metadataId}");
+                        }
+                        else if (def.ComponentType.Equals("webresource", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("webresource")
+                            {
+                                ColumnSet = new ColumnSet("webresourceid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("name", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"Web resource '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 61, // WebResource
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Web resource '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
+                        else if (def.ComponentType.Equals("securityrole", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("role")
+                            {
+                                ColumnSet = new ColumnSet("roleid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("name", ConditionOperator.Equal, def.EntityLogicalName);
+                            // Roles exist per BU — prefer the root BU role
+                            query.AddOrder("createdon", OrderType.Ascending);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"Security role '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 9, // Role
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Security role '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
+                        else if (def.ComponentType.Equals("customapi", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("customapi")
+                            {
+                                ColumnSet = new ColumnSet("customapiid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("uniquename", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"Custom API '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 10004, // CustomAPI
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Custom API '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
+                        else if (def.ComponentType.Equals("appaction", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("appaction")
+                            {
+                                ColumnSet = new ColumnSet("appactionid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("uniquename", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"App action '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 10082, // AppAction
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  App action '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
+                        else if (def.ComponentType.Equals("environmentvariable", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("environmentvariabledefinition")
+                            {
+                                ColumnSet = new ColumnSet("environmentvariabledefinitionid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("schemaname", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"Environment variable '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 380, // EnvironmentVariableDefinition
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Environment variable '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
+                        else if (def.ComponentType.Equals("appmodule", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("appmodule")
+                            {
+                                ColumnSet = new ColumnSet("appmoduleid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("uniquename", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"App module '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 80, // AppModule
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  App module '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
                         else
                         {
                             throw new InvalidOperationException($"Unsupported solution component type: {def.ComponentType}");
                         }
+                        break;
+                    }
+
+                    case CommitItemType.AddDirectSolutionComponent:
+                    {
+                        var def = (DirectSolutionComponentDefinition)item.ParsedData;
+                        log?.Invoke($"Adding component to solution: {def.DisplayName} (type {def.ComponentType}, id {def.ComponentId})");
+                        client.Execute(new AddSolutionComponentRequest
+                        {
+                            ComponentType = def.ComponentType,
+                            ComponentId = def.ComponentId,
+                            SolutionUniqueName = def.SolutionUniqueName,
+                            AddRequiredComponents = false
+                        });
+                        log?.Invoke($"  Added to {def.SolutionUniqueName}.");
                         break;
                     }
 
@@ -2005,6 +2230,14 @@ public static class CommitPipeline
                         var def = (SecurityRoleDeleteDefinition)item.ParsedData;
                         log?.Invoke($"Deleting role: {def.RoleName}");
                         SecurityRoleWriter.DeleteRole(client, def, log);
+                        break;
+                    }
+
+                    case CommitItemType.SecurityRolePrivilegeRemove:
+                    {
+                        var def = (SecurityRolePrivilegeRemoveDefinition)item.ParsedData;
+                        log?.Invoke($"Removing privileges from role: {def.RoleName}");
+                        SecurityRoleWriter.RemovePrivileges(client, def, log);
                         break;
                     }
 
@@ -2427,6 +2660,36 @@ public static class CommitPipeline
                 return !name.StartsWith('.') && !name.StartsWith('_');
             })
             ?? throw new InvalidOperationException("No solution folder found in SolutionExport/");
+    }
+
+    private static string BuildEntityLabel(EntityDefinition parsed, string pendingFilePath, string pendingDir)
+    {
+        try
+        {
+            var solutionExportDir = Path.GetDirectoryName(pendingDir)!;
+            var snapshotRelative = Path.GetRelativePath(pendingDir, pendingFilePath);
+            var snapshotPath = Path.Combine(GetSolutionFolder(solutionExportDir), snapshotRelative);
+
+            if (!File.Exists(snapshotPath))
+            {
+                var customCount = parsed.Attributes.Count(a => a.IsCustomField);
+                return $"Entity: {parsed.DisplayName} (new, {customCount} custom fields)";
+            }
+
+            var snapshot = EntityFileReader.Parse(snapshotPath);
+            var diff = EntityWriter.GetChangeSummary(parsed, snapshot);
+
+            return diff.Count == 0
+                ? $"Entity: {parsed.DisplayName} (no attribute changes)"
+                : diff.Count == 1
+                    ? $"Entity: {parsed.DisplayName} — {diff[0]}"
+                    : $"Entity: {parsed.DisplayName} — {diff.Count} fields changed: {string.Join(", ", diff)}";
+        }
+        catch
+        {
+            var customCount = parsed.Attributes.Count(a => a.IsCustomField);
+            return $"Entity: {parsed.DisplayName} ({customCount} custom fields)";
+        }
     }
 
     /// <summary>
