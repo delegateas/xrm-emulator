@@ -334,6 +334,20 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Plug-in content-only patches (hot-fix existing assembly bytes without
+        // touching solution membership, types, or steps).
+        var pendingPluginContentFiles = Directory.GetFiles(pendingDir, "*.plugincontent.json", SearchOption.AllDirectories)
+            .Where(f => f.Contains("PluginContentUpdates", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var f in pendingPluginContentFiles)
+        {
+            var parsed = PluginContentUpdateFileReader.Parse(f);
+            commitItems.Add(new CommitItem(CommitItemType.PluginContentUpdate,
+                $"Plugin content patch: {parsed.AssemblyName} → v{parsed.Version}",
+                f, parsed));
+        }
+
         // Custom API registrations
         var pendingCustomApiFiles = Directory.GetFiles(pendingDir, "*.customapi.json", SearchOption.AllDirectories)
             .Where(f => f.Contains("CustomApis", StringComparison.OrdinalIgnoreCase))
@@ -700,6 +714,7 @@ public static class CommitPipeline
             [CommitItemType.PluginRegistration] = 15,
             [CommitItemType.CustomApiRegistration] = 15, // Same as plugin — runs after assembly but references plugin type
             [CommitItemType.PluginManagedIdentity] = 16, // Must run after PluginRegistration: Dataverse rejects the assembly→MI link with 0x80040216 ("Plugin assembly must be signed with valid certificate to associate to Managed Identity") if the assembly isn't yet live and Authenticode-signed.
+            [CommitItemType.PluginContentUpdate] = 14, // Before PluginRegistration so a hot-fixed (signed) byte patch lands first; mostly only used standalone for cross-env patching.
             [CommitItemType.SlaKpi] = 14,  // Before SLA items — items reference KPIs
             [CommitItemType.SlaItem] = 15,
             [CommitItemType.DataImport] = 16,
@@ -2176,6 +2191,19 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.PluginContentUpdate:
+                    {
+                        var def = (PluginContentUpdateDefinition)item.ParsedData;
+                        log?.Invoke($"Patching plug-in assembly content: {def.AssemblyName} → v{def.Version}");
+                        var result = PluginContentUpdateWriter.Apply(client, def, baseDir);
+                        log?.Invoke($"  Updated pluginassembly {result.PluginAssemblyId}: {result.PreviousVersion} → {result.NewVersion}.");
+                        resolvedOutputs[relativePath] = new Dictionary<string, string>
+                        {
+                            ["id"] = result.PluginAssemblyId.ToString()
+                        };
+                        break;
+                    }
+
                     case CommitItemType.PluginManagedIdentity:
                     {
                         var def = (PluginManagedIdentityDefinition)item.ParsedData;
@@ -2185,7 +2213,11 @@ public static class CommitPipeline
                             log?.Invoke($"  Created managedidentity {result.ManagedIdentityId}.");
                         else
                             log?.Invoke($"  Reused existing managedidentity {result.ManagedIdentityId}.");
-                        if (result.LinkUpdated)
+                        if (result.LinkSkippedAssemblyMissing)
+                            log?.Invoke($"  Plug-in assembly '{def.AssemblyName}' not in CRM yet — managedidentity row created, link will come from the solution import or a later attach-mi.");
+                        else if (result.LinkSkippedAssemblyUnsigned)
+                            log?.Invoke($"  Plug-in assembly '{def.AssemblyName}' present but not Authenticode-signed in this env — managedidentity row created, link will come from the solution import (which carries the signed bits).");
+                        else if (result.LinkUpdated)
                             log?.Invoke($"  Linked pluginassembly {result.PluginAssemblyId} to managedidentity.");
                         else
                             log?.Invoke($"  Plug-in assembly already linked — no change.");

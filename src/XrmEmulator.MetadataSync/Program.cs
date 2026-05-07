@@ -5623,13 +5623,19 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
 {
     if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("remove", StringComparison.OrdinalIgnoreCase))
     {
-        HandlePluginRemoveCommand(positionalArgs, allArgs);
+        HandlePluginRemoveCommand(positionalArgs, allArgs).GetAwaiter().GetResult();
         return;
     }
 
     if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("sign", StringComparison.OrdinalIgnoreCase))
     {
         HandlePluginSignCommand(positionalArgs, allArgs);
+        return;
+    }
+
+    if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("push-content", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePluginPushContentCommand(positionalArgs, allArgs);
         return;
     }
 
@@ -5642,6 +5648,7 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
         AnsiConsole.MarkupLine("  plugin update <dll-path>       Re-sync a previously registered plugin (keeps types/steps)");
         AnsiConsole.MarkupLine("  plugin remove <assembly-name>  Remove a plugin assembly and its steps from CRM");
         AnsiConsole.MarkupLine("  plugin sign <dll-path>         Authenticode-sign a plugin DLL with the env's signing cert");
+        AnsiConsole.MarkupLine("  plugin push-content <name> <dll-path> [[--version v]]  Patch only pluginassembly.content + version (no solution/type/step changes)");
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[grey]Example: plugin register src/MyPlugin/bin/Release/net462/MyPlugin.dll[/]");
         Environment.Exit(1);
@@ -5751,7 +5758,7 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
 // ──────────────────────────────────────────────────────────────
 // plugin remove <assembly-name> — stage deletion of plugin assembly + steps
 // ──────────────────────────────────────────────────────────────
-static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
+static async Task HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
 {
     if (positionalArgs.Length < 3)
     {
@@ -5766,7 +5773,7 @@ static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
     var baseDir = GetBaseDir(metadataPath);
     var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
 
-    // Find plugin assembly in solution export
+    // Try to find plugin assembly in local solution export first
     var solutionFolder = GetSolutionFolder(solutionExportDir);
     var pluginAssembliesDir = Path.Combine(solutionFolder, "PluginAssemblies");
     var stepsDir = Path.Combine(solutionFolder, "SdkMessageProcessingSteps");
@@ -5836,6 +5843,53 @@ static void HandlePluginRemoveCommand(string[] positionalArgs, string[] allArgs)
                     stepFiles.Add((stepId, stepName, stepFile));
             }
         }
+    }
+
+    // Fallback: live-query Dataverse if the assembly isn't in this env's local export
+    // (e.g., onboarding kf-tst where only the kf-dev sync of the parent solution exists,
+    // or the assembly belongs to a managed solution we don't sync locally).
+    if (assemblyId == Guid.Empty)
+    {
+        AnsiConsole.MarkupLine("[grey]Assembly not in local solution export — querying Dataverse directly...[/]");
+        var metadata = ReadConnectionMetadata(metadataPath);
+        var connectionSettings = await ReconnectFromMetadata(metadata, configuration: null!, noCache: false);
+        using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+
+        var asmQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("pluginassembly")
+        {
+            ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("pluginassemblyid", "name"),
+            Criteria = new Microsoft.Xrm.Sdk.Query.FilterExpression
+            {
+                Conditions =
+                {
+                    new Microsoft.Xrm.Sdk.Query.ConditionExpression(
+                        "name", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, assemblyName)
+                }
+            },
+            TopCount = 1
+        };
+        var asmResults = client.RetrieveMultiple(asmQuery);
+        if (asmResults.Entities.Count == 0)
+        {
+            AnsiConsole.MarkupLine($"[red]Plug-in assembly '{assemblyName}' not found in CRM either.[/]");
+            Environment.Exit(1);
+        }
+        assemblyId = asmResults.Entities[0].Id;
+        AnsiConsole.MarkupLine($"[grey]Found pluginassembly {assemblyId}[/]");
+
+        var stepQuery = new Microsoft.Xrm.Sdk.Query.QueryExpression("sdkmessageprocessingstep")
+        {
+            ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet("sdkmessageprocessingstepid", "name")
+        };
+        var typeLink = stepQuery.AddLink("plugintype", "plugintypeid", "plugintypeid");
+        typeLink.LinkCriteria.AddCondition(
+            "pluginassemblyid", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, assemblyId);
+        var stepResults = client.RetrieveMultiple(stepQuery);
+        foreach (var step in stepResults.Entities)
+        {
+            stepFiles.Add((step.Id, step.GetAttributeValue<string>("name") ?? "Unknown step", string.Empty));
+        }
+        AnsiConsole.MarkupLine($"[grey]Found {stepFiles.Count} step(s) attached to assembly[/]");
     }
 
     // Create pending delete files
@@ -6073,6 +6127,80 @@ static void HandlePluginSignCommand(string[] positionalArgs, string[] allArgs)
     using var cert = X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password);
     AnsiConsole.MarkupLine($"[green]Signed:[/] {dllPath}");
     AnsiConsole.MarkupLine($"  Thumbprint: [bold]{cert.Thumbprint}[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// plugin push-content <assembly-name> <dll-path> [--version v]
+// In-place patch of pluginassembly.content + version. No solution / type / step
+// changes — meant for cross-env hot-fixing when the regular solution-import flow
+// can't update the bytes (e.g. managed-identity validation order locks them).
+// ──────────────────────────────────────────────────────────────
+static void HandlePluginPushContentCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 4)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin push-content <assembly-name> <dll-path> [[--version v]]");
+        Environment.Exit(1);
+    }
+
+    var assemblyName = positionalArgs[2];
+    var dllPath = positionalArgs[3];
+    if (!File.Exists(dllPath))
+    {
+        var fullPath = Path.GetFullPath(dllPath);
+        if (!File.Exists(fullPath))
+        {
+            AnsiConsole.MarkupLine($"[red]DLL not found:[/] {dllPath}");
+            Environment.Exit(1);
+        }
+        dllPath = fullPath;
+    }
+
+    var versionArg = ParseNamedArg(allArgs, "--version");
+    string version;
+    if (!string.IsNullOrEmpty(versionArg))
+    {
+        version = versionArg;
+    }
+    else
+    {
+        // Default: read AssemblyVersion from the DLL's metadata.
+        var asmName = System.Reflection.AssemblyName.GetAssemblyName(dllPath);
+        version = asmName.Version?.ToString() ?? throw new InvalidOperationException(
+            "Could not read AssemblyVersion from DLL — pass --version explicitly.");
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "PluginContentUpdates");
+    Directory.CreateDirectory(pendingDir);
+
+    var relativeDllPath = Path.GetRelativePath(baseDir, Path.GetFullPath(dllPath));
+
+    var definition = new XrmEmulator.MetadataSync.Models.PluginContentUpdateDefinition
+    {
+        AssemblyName = assemblyName,
+        AssemblyPath = relativeDllPath,
+        Version = version
+    };
+
+    var safeName = assemblyName.Replace(" ", "_").Replace("/", "_").Replace("\\", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.plugincontent.json");
+    File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine("[green]Plug-in content patch staged:[/]");
+    AnsiConsole.MarkupLine($"  Assembly:  {assemblyName}");
+    AnsiConsole.MarkupLine($"  DLL:       {relativeDllPath}");
+    AnsiConsole.MarkupLine($"  Version:   {version}");
+    AnsiConsole.MarkupLine($"  File:      {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to apply. Solution membership, types, and steps are untouched.[/]");
 }
 
 static void SignWithOsslsigncode(string dllPath, string pfxPath, string password)
@@ -6368,13 +6496,14 @@ static Task HandlePluginAttachMiCommand(string[] positionalArgs, string[] allArg
 {
     if (positionalArgs.Length < 3)
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] plugin attach-mi <assembly-name> --client-id <uami-app-id> --tenant <uami-tenant-id>");
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin attach-mi <assembly-name> --client-id <uami-app-id> --tenant <uami-tenant-id> [[--managed-identity-id <guid>]]");
         Environment.Exit(1);
     }
 
     var assemblyName = positionalArgs[2];
     var clientIdArg = ParseNamedArg(allArgs, "--client-id");
     var tenantArg = ParseNamedArg(allArgs, "--tenant");
+    var miIdArg = ParseNamedArg(allArgs, "--managed-identity-id");
     if (string.IsNullOrEmpty(clientIdArg) || string.IsNullOrEmpty(tenantArg))
     {
         AnsiConsole.MarkupLine("[red]--client-id and --tenant are required.[/]");
@@ -6390,6 +6519,16 @@ static Task HandlePluginAttachMiCommand(string[] positionalArgs, string[] allArg
         AnsiConsole.MarkupLine("[red]--tenant must be a GUID.[/]");
         Environment.Exit(1);
     }
+    Guid? managedIdentityId = null;
+    if (!string.IsNullOrEmpty(miIdArg))
+    {
+        if (!Guid.TryParse(miIdArg, out var parsedMiId))
+        {
+            AnsiConsole.MarkupLine("[red]--managed-identity-id must be a GUID.[/]");
+            Environment.Exit(1);
+        }
+        managedIdentityId = parsedMiId;
+    }
 
     var metadataPath = FindConnectionMetadata();
     var baseDir = GetBaseDir(metadataPath);
@@ -6402,7 +6541,8 @@ static Task HandlePluginAttachMiCommand(string[] positionalArgs, string[] allArg
     {
         AssemblyName = assemblyName,
         ApplicationId = clientId,
-        TenantId = tenantId
+        TenantId = tenantId,
+        ManagedIdentityId = managedIdentityId
     };
 
     var safeName = assemblyName.Replace(" ", "_").Replace("/", "_").Replace("\\", "_");
@@ -6410,16 +6550,19 @@ static Task HandlePluginAttachMiCommand(string[] positionalArgs, string[] allArg
     File.WriteAllText(destPath, JsonSerializer.Serialize(definition, new JsonSerializerOptions
     {
         WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     }));
 
     AnsiConsole.MarkupLine("[green]Plug-in managed-identity binding staged:[/]");
     AnsiConsole.MarkupLine($"  Assembly:          {assemblyName}");
     AnsiConsole.MarkupLine($"  UAMI Application:  {clientId}");
     AnsiConsole.MarkupLine($"  UAMI Tenant:       {tenantId}");
+    if (managedIdentityId is { } pinnedId)
+        AnsiConsole.MarkupLine($"  Managed Identity:  {pinnedId} [grey](pinned)[/]");
     AnsiConsole.MarkupLine($"  File:              {destPath}");
     AnsiConsole.WriteLine();
-    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to apply. The plug-in DLL must already be Authenticode-signed and pushed first.[/]");
+    AnsiConsole.MarkupLine("[yellow]Run [blue]commit[/] to apply. If the assembly isn't yet in CRM (pre-import scenario), only the managedidentity row is created — the link comes in later from the solution import.[/]");
 
     return Task.CompletedTask;
 }

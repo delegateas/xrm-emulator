@@ -8,7 +8,7 @@ public record ConnectionMetadata
     public required SolutionMetadata Solution { get; init; }
     public required string AuthMode { get; init; }
     public string? ClientId { get; init; }
-    public DateTimeOffset SyncedAt { get; init; }
+    public DateTimeOffset? SyncedAt { get; init; }
 }
 
 public record EnvironmentMetadata
