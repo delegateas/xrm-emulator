@@ -2166,6 +2166,9 @@ public static class CommitPipeline
                                 var stepId = PluginWriter.RegisterStep(client, stepDef, typeId, def.SolutionUniqueName);
                                 log?.Invoke($"    Step registered: {stepDef.MessageName} on {stepDef.PrimaryEntity} (ID: {stepId})");
 
+                                // Always sync images: delete all existing first so repeated commits
+                                // don't accumulate duplicate registrations.
+                                PluginWriter.DeleteStepImages(client, stepId);
                                 if (stepDef.Images != null)
                                 {
                                     foreach (var imageDef in stepDef.Images)

@@ -379,7 +379,7 @@ public static class PluginWriter
             .ToList();
     }
 
-    private static void DeleteStepImages(IOrganizationService service, Guid stepId)
+    public static void DeleteStepImages(IOrganizationService service, Guid stepId)
     {
         var query = new QueryExpression("sdkmessageprocessingstepimage")
         {
