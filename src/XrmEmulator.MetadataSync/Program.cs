@@ -80,8 +80,8 @@ try
         .AddCommandLine(args)
         .Build();
 
-    var noCache = configuration.GetValue<bool>("no-cache");
-    var debug = configuration.GetValue<bool>("debug");
+    var noCache = HasFlag(args, "--no-cache");
+    var debug = HasFlag(args, "--debug");
 
     if (HasFlag(args, "--help") || HasFlag(args, "-h"))
     {
@@ -2151,6 +2151,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
     AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
     AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
+    AnsiConsole.MarkupLine("  [bold]pcf push[/] <project-path> [[--prefix kf]]              Build, validate and stage a PCF control for commit");
     AnsiConsole.MarkupLine("  [bold]plugin register|update|remove|sign[/] ...             Plug-in lifecycle (last is Authenticode sign)");
     AnsiConsole.MarkupLine("  [bold]plugin attach-mi[/] <asm> --client-id <id> --tenant <id>  Bind plug-in assembly to a UAMI for KV access");
     AnsiConsole.MarkupLine("  [bold]cert generate[/] [[--name <cn>]] [[--out <pfx>]] [[--password <p>]] [[--years <n>]]  Generate a self-signed code-signing cert");
@@ -5034,11 +5035,20 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
 {
     if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
     {
-        AnsiConsole.MarkupLine("[bold]MetadataSync pcf[/] — stage PCF control for deployment");
+        AnsiConsole.MarkupLine("[bold]MetadataSync pcf[/] — build, validate and stage a PCF control for deployment");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("  pcf push <project-path> [--prefix <publisher-prefix>]");
-        AnsiConsole.MarkupLine("    Stage a PCF control project for deployment via commit.");
-        AnsiConsole.MarkupLine("    The project must have been initialized with 'pac pcf push' at least once.");
+        AnsiConsole.MarkupLine("    Validates the project structure, bumps the patch version,");
+        AnsiConsole.MarkupLine("    runs npm run build + dotnet build (cdsproj), and writes the _pending/ file.");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Required project layout:[/]");
+        AnsiConsole.MarkupLine("  <ProjectRoot>/");
+        AnsiConsole.MarkupLine("    <Constructor>/ControlManifest.Input.xml   ← subfolder must match constructor name");
+        AnsiConsole.MarkupLine("    <Constructor>/index.ts");
+        AnsiConsole.MarkupLine("    <Constructor>/css/");
+        AnsiConsole.MarkupLine("    <Constructor>.pcfproj");
+        AnsiConsole.MarkupLine("    package.json  pcfconfig.json  eslint.config.mjs  node_modules/");
+        AnsiConsole.MarkupLine("    obj/PowerAppsToolsTemp_<prefix>/PowerAppsToolsTemp_<prefix>.cdsproj");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[grey]Example:[/]");
         AnsiConsole.MarkupLine("  pcf push src/pcf/EnreachQueueControl --prefix kf");
@@ -5084,6 +5094,52 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
     var constructor = controlEl.Attribute("constructor")!.Value;
     var controlName = $"{ns}.{constructor}";
 
+    // Validate project structure
+    var issues = new List<string>();
+
+    var subfolderPath = Path.Combine(projectPath, constructor);
+    var expectedManifest = Path.Combine(subfolderPath, "ControlManifest.Input.xml");
+    if (!File.Exists(expectedManifest))
+        issues.Add($"ControlManifest.Input.xml must be in a subfolder named '{constructor}/', not at the project root." +
+                   $"\n    Found:    {Path.GetRelativePath(projectPath, manifestFiles[0])}" +
+                   $"\n    Expected: {constructor}/ControlManifest.Input.xml");
+
+    if (!File.Exists(Path.Combine(subfolderPath, "index.ts")))
+        issues.Add($"Missing: {constructor}/index.ts");
+
+    if (!Directory.Exists(Path.Combine(subfolderPath, "css")))
+        issues.Add($"Missing: {constructor}/css/ directory");
+
+    if (!File.Exists(Path.Combine(projectPath, $"{constructor}.pcfproj")))
+        issues.Add($"Missing: {constructor}.pcfproj at project root");
+
+    if (!File.Exists(Path.Combine(projectPath, "package.json")))
+        issues.Add("Missing: package.json at project root");
+
+    var pcfconfigPath = Path.Combine(projectPath, "pcfconfig.json");
+    if (!File.Exists(pcfconfigPath))
+        issues.Add("Missing: pcfconfig.json at project root — required content: {\"outDir\": \"./out/controls\"}");
+    else if (!File.ReadAllText(pcfconfigPath).Contains("out/controls"))
+        issues.Add("pcfconfig.json must contain \"outDir\": \"./out/controls\"");
+
+    if (!File.Exists(Path.Combine(projectPath, "eslint.config.mjs")))
+        issues.Add("Missing: eslint.config.mjs at project root (required by pcf-scripts)");
+
+    if (!Directory.Exists(Path.Combine(projectPath, "node_modules")))
+        issues.Add("Missing: node_modules/ — run 'npm install' in the project directory first");
+
+    if (issues.Count > 0)
+    {
+        AnsiConsole.MarkupLine("[red]PCF project structure validation failed:[/]");
+        AnsiConsole.WriteLine();
+        foreach (var issue in issues)
+            AnsiConsole.MarkupLine($"  [red]✗[/] {Markup.Escape(issue)}");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Clone the layout from an existing PCF in src/pcf/ and adjust. Run 'pcf push --help' for the required structure.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
     // Auto-bump patch version
     var oldVersion = controlEl.Attribute("version")?.Value ?? "1.0.0";
     var vParts = oldVersion.Split('.');
@@ -5108,7 +5164,7 @@ static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
     if (!File.Exists(cdsProj))
     {
         AnsiConsole.MarkupLine($"[yellow]Warning:[/] cdsproj not found at: {cdsProj}");
-        AnsiConsole.MarkupLine($"[yellow]Run 'pac pcf push --publisher-prefix {prefix}' once to scaffold it.[/]");
+        AnsiConsole.MarkupLine($"[yellow]Clone obj/PowerAppsToolsTemp_{prefix}/ from an existing PCF project and update the <ProjectReference> inside the cdsproj to point to {constructor}.pcfproj.[/]");
         Environment.Exit(1);
         return;
     }

@@ -82,7 +82,8 @@ public partial class OAuthTokenProvider
             $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
             $"&scope={Uri.EscapeDataString(scope)}" +
             $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
-            $"&code_challenge_method=S256";
+            $"&code_challenge_method=S256" +
+            $"&prompt=select_account";
 
         if (TryOpenBrowser(authorizeUrl))
         {
