@@ -217,6 +217,16 @@ try
         HandleSolutionAddComponentCommand(positionalArgs, args);
     }
     else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("solution", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("remove-component", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleSolutionRemoveComponentCommand(positionalArgs, args);
+    }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("solution", StringComparison.OrdinalIgnoreCase)
+        && positionalArgs[1].Equals("import", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleSolutionImportCommand(positionalArgs, args, configuration, noCache);
+    }
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("solution", StringComparison.OrdinalIgnoreCase)
         && positionalArgs[1].Equals("copy-components", StringComparison.OrdinalIgnoreCase))
     {
         await HandleSolutionCopyComponentsCommand(positionalArgs, args, configuration, noCache);
@@ -2152,6 +2162,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
     AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
     AnsiConsole.MarkupLine("  [bold]pcf push[/] <project-path> [[--prefix kf]]              Build, validate and stage a PCF control for commit");
+    AnsiConsole.MarkupLine("  [bold]solution import[/] <zip> [[--skip-product-update-deps]]  Import a solution zip, optionally ignoring first-party package deps");
+    AnsiConsole.MarkupLine("  [bold]solution remove-component[/] --type <t> --id <guid>  Remove a component from the solution (does NOT delete it)");
     AnsiConsole.MarkupLine("  [bold]plugin register|update|remove|sign[/] ...             Plug-in lifecycle (last is Authenticode sign)");
     AnsiConsole.MarkupLine("  [bold]plugin attach-mi[/] <asm> --client-id <id> --tenant <id>  Bind plug-in assembly to a UAMI for KV access");
     AnsiConsole.MarkupLine("  [bold]cert generate[/] [[--name <cn>]] [[--out <pfx>]] [[--password <p>]] [[--years <n>]]  Generate a self-signed code-signing cert");
@@ -3993,6 +4005,164 @@ static void PrintSolutionAddComponentUsage()
     AnsiConsole.MarkupLine("[grey]  solution add-component --type optionset --name kf_yesnoinherited[/]");
     AnsiConsole.MarkupLine("[grey]  solution add-component --type securityrole --role Partner_Manager[/]");
     AnsiConsole.MarkupLine("[grey]  solution add-component --type webresource --name kf_partner_form.js[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// solution import <zip-path> [--skip-product-update-deps] [--overwrite] [--publish-workflows]
+// ──────────────────────────────────────────────────────────────
+static async Task HandleSolutionImportCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] solution import <zip-path> [[--skip-product-update-deps]] [[--overwrite]] [[--publish-workflows]]");
+        AnsiConsole.MarkupLine("[grey]  --skip-product-update-deps   Ignore unresolvable first-party package dependencies (canResolveMissingDependency=True)[/]");
+        AnsiConsole.MarkupLine("[grey]  --overwrite                  Overwrite unmanaged customizations[/]");
+        AnsiConsole.MarkupLine("[grey]  --publish-workflows          Activate workflows after import[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    var zipPath = positionalArgs[2];
+    if (!File.Exists(zipPath))
+    {
+        AnsiConsole.MarkupLine($"[red]File not found:[/] {zipPath}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var skipProductUpdateDeps = HasFlag(allArgs, "--skip-product-update-deps");
+    var overwrite             = HasFlag(allArgs, "--overwrite");
+    var publishWorkflows      = HasFlag(allArgs, "--publish-workflows");
+
+    var metadataPath = FindConnectionMetadata();
+    var metadata     = ReadConnectionMetadata(metadataPath);
+    var connSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connSettings);
+
+    var solutionBytes = File.ReadAllBytes(zipPath);
+
+    AnsiConsole.MarkupLine($"[grey]Importing [/][bold]{Path.GetFileName(zipPath)}[/][grey] ({solutionBytes.Length / 1024} KB)...[/]");
+    if (skipProductUpdateDeps)
+        AnsiConsole.MarkupLine("[grey]  --skip-product-update-deps: first-party package dependencies will be ignored[/]");
+
+    var importJobId = Guid.NewGuid();
+    var request = new Microsoft.Crm.Sdk.Messages.ImportSolutionRequest
+    {
+        CustomizationFile              = solutionBytes,
+        OverwriteUnmanagedCustomizations = overwrite,
+        PublishWorkflows               = publishWorkflows,
+        SkipProductUpdateDependencies  = skipProductUpdateDeps,
+        ImportJobId                    = importJobId,
+    };
+
+    try
+    {
+        client.Execute(request);
+        AnsiConsole.MarkupLine("[green]Import succeeded.[/]");
+    }
+    catch (Exception ex)
+    {
+        // Fetch the import job for detailed error info
+        try
+        {
+            var job = client.Retrieve("importjob", importJobId, new Microsoft.Xrm.Sdk.Query.ColumnSet("progress", "data", "completedon"));
+            var data = job.GetAttributeValue<string>("data");
+            if (!string.IsNullOrEmpty(data))
+            {
+                // Extract error messages from the import job XML
+                var doc = System.Xml.Linq.XDocument.Parse(data);
+                var errors = doc.Descendants("result")
+                    .Where(r => r.Attribute("result")?.Value == "failure")
+                    .Select(r => r.Attribute("errortext")?.Value)
+                    .Where(e => !string.IsNullOrEmpty(e))
+                    .Distinct()
+                    .ToList();
+                if (errors.Count > 0)
+                {
+                    AnsiConsole.MarkupLine("[red]Import failed. Errors from import job:[/]");
+                    foreach (var err in errors)
+                        AnsiConsole.MarkupLine($"  [red]•[/] {err}");
+                    Environment.Exit(1);
+                    return;
+                }
+            }
+        }
+        catch { /* fall through to generic error */ }
+
+        AnsiConsole.MarkupLine($"[red]Import failed:[/] {ex.Message}");
+        Environment.Exit(1);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// solution remove-component --type <type> --id <guid> [--name <display>] [--solution <name>]
+// ──────────────────────────────────────────────────────────────
+static void HandleSolutionRemoveComponentCommand(string[] positionalArgs, string[] allArgs)
+{
+    var componentTypeRaw = ParseNamedArg(allArgs, "--type")?.ToLowerInvariant();
+    var componentIdRaw   = ParseNamedArg(allArgs, "--id");
+    var displayName      = ParseNamedArg(allArgs, "--name");
+    var solutionOverride = ParseNamedArg(allArgs, "--solution");
+
+    if (string.IsNullOrEmpty(componentTypeRaw) || string.IsNullOrEmpty(componentIdRaw))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/]");
+        AnsiConsole.MarkupLine("  solution remove-component --type <type> --id <guid> [--name <display>] [--solution <name>]");
+        AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]Types: form (60), view (1039), attribute (2), entity (1), workflow (29), or a raw integer.[/]");
+        AnsiConsole.MarkupLine("[grey]Examples:[/]");
+        AnsiConsole.MarkupLine("[grey]  solution remove-component --type form --id e1ec2c0c-1744-42fa-a346-fb8237357d0f --name \"Sales Insights\"[/]");
+        AnsiConsole.MarkupLine("[grey]  solution remove-component --type view --id 74cdcebc-ca43-f111-88b4-7ced8d2f096e[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    var componentType = componentTypeRaw switch
+    {
+        "form"      => 60,
+        "view"      => 1039,
+        "attribute" => 2,
+        "entity"    => 1,
+        "workflow"  => 29,
+        _ when int.TryParse(componentTypeRaw, out var n) => n,
+        _ => throw new InvalidOperationException($"Unknown component type '{componentTypeRaw}'. Use form/view/attribute/entity/workflow or a raw integer.")
+    };
+
+    if (!Guid.TryParse(componentIdRaw.Trim('{', '}'), out var componentId))
+    {
+        AnsiConsole.MarkupLine($"[red]Invalid GUID:[/] {componentIdRaw}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "RemoveFromSolution");
+    Directory.CreateDirectory(pendingDir);
+
+    var safeName = (displayName ?? componentId.ToString()).Replace(" ", "_").Replace("/", "_");
+    var destPath = Path.Combine(pendingDir, $"{safeName}.removesolutioncomponent.json");
+
+    var def = new XrmEmulator.MetadataSync.Models.RemoveSolutionComponentDefinition
+    {
+        ComponentType = componentType,
+        ComponentId   = componentId,
+        DisplayName   = displayName ?? $"type-{componentType} {componentId}",
+        SolutionUniqueName = solutionOverride
+    };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged remove-from-solution:[/] {def.DisplayName}");
+    AnsiConsole.MarkupLine($"[grey]Component type {componentType}, ID {componentId}[/]");
+    if (!string.IsNullOrEmpty(solutionOverride))
+        AnsiConsole.MarkupLine($"[grey]Solution override: {solutionOverride}[/]");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine("[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────

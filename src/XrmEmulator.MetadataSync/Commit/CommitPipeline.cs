@@ -491,6 +491,19 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Generic remove-from-solution (does NOT delete the component — only removes solution membership)
+        var pendingRemoveSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.removesolutioncomponent.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingRemoveSolutionComponentFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<RemoveSolutionComponentDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.RemoveSolutionComponent,
+                $"Remove from Solution: {parsed.DisplayName ?? parsed.ComponentId.ToString()} (type {parsed.ComponentType})",
+                f, parsed));
+        }
+
         // Workflow remove-from-solution (does NOT delete the workflow — only removes solution membership)
         var pendingWorkflowRemoveFiles = Directory.GetFiles(pendingDir, "*.workflowremovefromsolution.json", SearchOption.AllDirectories)
             .ToList();
@@ -698,6 +711,7 @@ public static class CommitPipeline
             [CommitItemType.AppModuleRole] = 13, // After role creation (SecurityRoleUpdate=3) and after AppModule entity/view/form edits (10-12)
             [CommitItemType.WorkflowActivation] = 8, // After BusinessRule, before AppModule components
             [CommitItemType.WorkflowRemoveFromSolution] = 8,
+            [CommitItemType.RemoveSolutionComponent] = 8,
             [CommitItemType.WebResourceUpload] = 3,
             [CommitItemType.IconUpload] = 4,
             [CommitItemType.IconSet] = 5,
@@ -1512,7 +1526,42 @@ public static class CommitPipeline
                             _ => AttributeRequiredLevel.None
                         };
 
-                        if (def.AttributeType.Equals("customer", StringComparison.OrdinalIgnoreCase))
+                        // Update path: retrieve existing attribute and patch DisplayName / Description.
+                        // Must run before the type-specific create branches so lookup/customer/polymorphic
+                        // types also support action="update" without trying to re-create the field.
+                        if (string.Equals(def.Action, "update", StringComparison.OrdinalIgnoreCase))
+                        {
+                            log?.Invoke($"Updating attribute: {def.EntityLogicalName}.{def.AttributeLogicalName}");
+                            var retrieveReq = new RetrieveAttributeRequest
+                            {
+                                EntityLogicalName = def.EntityLogicalName,
+                                LogicalName = def.AttributeLogicalName
+                            };
+                            var retrieveResp = (RetrieveAttributeResponse)client.Execute(retrieveReq);
+                            var attrMetadata = retrieveResp.AttributeMetadata;
+
+                            attrMetadata.DisplayName = new Label(def.DisplayName, 1030);
+                            if (!string.IsNullOrEmpty(def.Description))
+                                attrMetadata.Description = new Label(def.Description, 1030);
+
+                            var updateReq = new UpdateAttributeRequest
+                            {
+                                EntityName = def.EntityLogicalName,
+                                Attribute = attrMetadata,
+                                MergeLabels = true
+                            };
+                            updateReq.Parameters["SolutionUniqueName"] = def.SolutionUniqueName;
+                            client.Execute(updateReq);
+                            log?.Invoke($"  Attribute updated OK.");
+
+                            // Insert new local picklist options if defined (additive — existing values are skipped)
+                            if (def.Options is { Count: > 0 } && string.IsNullOrEmpty(def.OptionSetName))
+                            {
+                                InsertLocalOptionValues(client, def.EntityLogicalName, def.AttributeLogicalName,
+                                    def.Options, def.SolutionUniqueName, log);
+                            }
+                        }
+                        else if (def.AttributeType.Equals("customer", StringComparison.OrdinalIgnoreCase))
                         {
                             // Customer lookup: polymorphic lookup targeting both Account and Contact.
                             // CreateCustomerRelationshipsRequest is not available as a typed class in
@@ -1845,7 +1894,7 @@ public static class CommitPipeline
                         {
                             var addReq = new AddSolutionComponentRequest
                             {
-                                ComponentType = 24, // SystemForm
+                                ComponentType = 60, // SystemForm
                                 ComponentId = Guid.Parse(def.AttributeLogicalName),
                                 SolutionUniqueName = def.SolutionUniqueName,
                                 AddRequiredComponents = false
@@ -2340,6 +2389,32 @@ public static class CommitPipeline
                             ?? throw new InvalidOperationException("No solution specified and env has no default solution.");
                         log?.Invoke($"Removing workflow from solution: {def.WorkflowName} → {solution}");
                         BusinessRuleWriter.RemoveWorkflowFromSolution(client, workflowId, solution, log);
+                        break;
+                    }
+
+                    case CommitItemType.RemoveSolutionComponent:
+                    {
+                        var def = (RemoveSolutionComponentDefinition)item.ParsedData;
+                        var solution = def.SolutionUniqueName ?? metadata.Solution?.UniqueName
+                            ?? throw new InvalidOperationException("No solution specified and env has no default solution.");
+                        log?.Invoke($"Removing component {def.ComponentId} (type {def.ComponentType}) from solution '{solution}'");
+                        try
+                        {
+                            client.Execute(new Microsoft.Crm.Sdk.Messages.RemoveSolutionComponentRequest
+                            {
+                                ComponentId = def.ComponentId,
+                                ComponentType = def.ComponentType,
+                                SolutionUniqueName = solution
+                            });
+                            log?.Invoke($"  Removed OK.");
+                        }
+                        catch (System.ServiceModel.FaultException<Microsoft.Xrm.Sdk.OrganizationServiceFault> ex)
+                        {
+                            if (ex.Detail.Message.Contains("does not exist") || ex.Detail.Message.Contains("not found"))
+                                log?.Invoke($"  Component was not in solution — skip (idempotent).");
+                            else
+                                throw;
+                        }
                         break;
                     }
 
