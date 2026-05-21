@@ -9134,6 +9134,9 @@ static async Task HandleCustomApiCommand(string[] positionalArgs, string[] allAr
         case "new":
             HandleCustomApiNewCommand(positionalArgs);
             break;
+        case "checkout":
+            HandleCustomApiCheckoutCommand(positionalArgs);
+            break;
         case "test":
             await HandleCustomApiTestCommand(positionalArgs, allArgs, configuration, noCache);
             break;
@@ -9148,10 +9151,12 @@ static void PrintCustomApiUsage()
 {
     AnsiConsole.MarkupLine("[red]Usage:[/]");
     AnsiConsole.MarkupLine("  customapi new <unique-name>                          Create a new Custom API pending file");
+    AnsiConsole.MarkupLine("  customapi checkout <unique-name>                     Checkout existing Custom API for editing");
     AnsiConsole.MarkupLine("  customapi test <unique-name> --param Key=Value ...   Invoke a Custom API and show the result");
     AnsiConsole.MarkupLine("");
     AnsiConsole.MarkupLine("[grey]Examples:[/]");
     AnsiConsole.MarkupLine("  customapi new kf_CheckCustomerAccess");
+    AnsiConsole.MarkupLine("  customapi checkout kf_QualifyLead");
     AnsiConsole.MarkupLine("  customapi test kf_CheckCustomerAccess --param EntityLogicalName=contact --param RecordId=00000000-0000-0000-0000-000000000001");
 }
 
@@ -9209,6 +9214,48 @@ static void HandleCustomApiNewCommand(string[] positionalArgs)
     AnsiConsole.MarkupLine($"  File:        {destPath}");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Edit the file to set pluginTypeName, request parameters, and response properties, then run [blue]commit[/] to push to CRM.[/]");
+}
+
+static void HandleCustomApiCheckoutCommand(string[] positionalArgs)
+{
+    if (positionalArgs.Length < 3)
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] customapi checkout <unique-name>");
+        Environment.Exit(1);
+    }
+
+    var uniqueName = positionalArgs[2];
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    var committedPath = Path.Combine(solutionExportDir, "_committed", "CustomApis", $"{uniqueName}.customapi.json");
+    if (!File.Exists(committedPath))
+    {
+        AnsiConsole.MarkupLine($"[red]Custom API not found in _committed:[/] {committedPath}");
+        AnsiConsole.MarkupLine("Use [blue]customapi new[/] to scaffold a new Custom API instead.");
+        Environment.Exit(1);
+    }
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "CustomApis");
+    Directory.CreateDirectory(pendingDir);
+
+    var destPath = Path.Combine(pendingDir, $"{uniqueName}.customapi.json");
+    if (File.Exists(destPath))
+    {
+        AnsiConsole.MarkupLine($"[yellow]Pending file already exists:[/] {destPath}");
+        AnsiConsole.MarkupLine("Edit it directly, or delete it and re-run checkout to reset.");
+        return;
+    }
+
+    File.Copy(committedPath, destPath);
+
+    AnsiConsole.MarkupLine($"[green]Checked out Custom API for editing:[/]");
+    AnsiConsole.MarkupLine($"  Unique Name: {uniqueName}");
+    AnsiConsole.MarkupLine($"  File:        {destPath}");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Edit the file in _pending/, then run [blue]commit[/] to push changes to CRM.[/]");
 }
 
 static async Task HandleCustomApiTestCommand(string[] positionalArgs, string[] allArgs,
