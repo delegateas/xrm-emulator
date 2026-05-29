@@ -11,6 +11,7 @@ public static class MetadataScopePicker
     private const string SecurityRolesOption = "Security Roles";
     private const string GlobalOptionSetsOption = "Global Option Sets";
     private const string CurrenciesOrgOption = "Currencies & Organization";
+    private const string OrgStructureOption = "Business Units & Teams";
     private const string SolutionExportOption = "Solution Export & Unpack";
     private const string RibbonExportOption = "Entity Ribbon XML";
 
@@ -29,7 +30,8 @@ public static class MetadataScopePicker
             WorkflowsOption,
             SecurityRolesOption,
             GlobalOptionSetsOption,
-            CurrenciesOrgOption
+            CurrenciesOrgOption,
+            OrgStructureOption
         };
 
         if (!isDefaultSolution)
@@ -73,6 +75,7 @@ public static class MetadataScopePicker
             IncludeSecurityRoles = selectedSet.Contains(SecurityRolesOption),
             IncludeOptionSets = selectedSet.Contains(GlobalOptionSetsOption),
             IncludeOrganizationData = selectedSet.Contains(CurrenciesOrgOption),
+            IncludeOrgStructure = selectedSet.Contains(OrgStructureOption),
             IncludeSolutionExport = selectedSet.Contains(SolutionExportOption),
             IncludeRibbonExport = selectedSet.Contains(RibbonExportOption)
         };

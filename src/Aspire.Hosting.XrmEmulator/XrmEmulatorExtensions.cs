@@ -1,4 +1,7 @@
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Lifecycle;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Xrm.Sdk;
 
 namespace Aspire.Hosting;
 
@@ -183,5 +186,34 @@ public static class XrmEmulatorExtensions
         string solutionExportsPath)
     {
         return builder.WithEnvironment("SolutionExports__Path", solutionExportsPath);
+    }
+
+    /// <summary>
+    /// Registers a seed action that runs once the XRM Emulator is healthy.
+    /// The action receives an <see cref="IOrganizationService"/> connected to the emulator
+    /// and should use it to create or upsert records. A snapshot is saved after seeding completes.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator project.</param>
+    /// <param name="seedAction">
+    /// Delegate that receives an <see cref="IOrganizationService"/> and seeds data.
+    /// Use <see cref="Microsoft.Xrm.Sdk.Messages.UpsertRequest"/> for idempotent seeds.
+    /// </param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ProjectResource> WithSeedData(
+        this IResourceBuilder<ProjectResource> builder,
+        Func<IOrganizationService, Task> seedAction)
+    {
+        builder.Resource.Annotations.Add(new XrmEmulatorSeedDataAnnotation(seedAction));
+
+        // Register the lifecycle hook only once per AppHost
+#pragma warning disable CS0618 // IDistributedApplicationLifecycleHook is obsolete but still functional
+        if (!builder.ApplicationBuilder.Services.Any(s => s.ImplementationType == typeof(XrmEmulatorSeedHook)))
+        {
+            builder.ApplicationBuilder.Services
+                .AddSingleton<IDistributedApplicationLifecycleHook, XrmEmulatorSeedHook>();
+        }
+#pragma warning restore CS0618
+
+        return builder;
     }
 }

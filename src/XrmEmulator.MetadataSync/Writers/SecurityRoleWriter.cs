@@ -39,6 +39,7 @@ public static class SecurityRoleWriter
             .ToList();
 
         var addedPrivileges = new List<RolePrivilege>();
+        var privilegeNames = new Dictionary<Guid, string>();
 
         foreach (var entityGroup in privilegesByEntity)
         {
@@ -47,12 +48,13 @@ public static class SecurityRoleWriter
             foreach (var priv in entityGroup)
             {
                 var privilegeId = ResolvePrivilege(service, priv.Access, entityLogicalName, log);
+                var privilegeName = MapAccessToPrivilegeName(priv.Access, entityLogicalName);
 
                 if (privilegeId == null)
                 {
-                    var privilegeName = MapAccessToPrivilegeName(priv.Access, entityLogicalName);
-                    log?.Invoke($"  WARNING: Privilege '{privilegeName}' not found — skipping");
-                    continue;
+                    throw new InvalidOperationException(
+                        $"Privilege '{privilegeName}' not found in Dataverse. " +
+                        "Check the entity name and access type — no changes have been applied to the role.");
                 }
 
                 var depth = ParseDepth(priv.Depth);
@@ -61,6 +63,7 @@ public static class SecurityRoleWriter
                     PrivilegeId = privilegeId.Value,
                     Depth = depth
                 });
+                privilegeNames[privilegeId.Value] = privilegeName;
 
                 log?.Invoke($"  {priv.Access} on {entityLogicalName} ({depth}) → privilege {privilegeId.Value}");
             }
@@ -83,23 +86,39 @@ public static class SecurityRoleWriter
         if (deduped.Length < addedPrivileges.Count)
             log?.Invoke($"  Deduplicated {addedPrivileges.Count - deduped.Length} duplicate privilege GUID(s) before sending.");
 
-        // Add all privileges in one call
-        var request = new AddPrivilegesRoleRequest
+        // Fetch the role's existing privileges so ReplacePrivilegesRoleRequest does not wipe them.
+        // ReplacePrivilegesRoleRequest requires the complete desired set — pending entries are
+        // merged in (new depth wins on conflict). This also fixes the silent-drop issue that
+        // AddPrivilegesRoleRequest has with certain system-entity privileges (e.g. prvAppendToUser).
+        var existingPrivileges = FetchExistingRolePrivileges(service, roleId);
+        log?.Invoke($"  Fetched {existingPrivileges.Length} existing privilege(s) from role.");
+
+        // Merge: start from existing, overwrite any that appear in the pending delta.
+        var pendingById = deduped.ToDictionary(p => p.PrivilegeId);
+        var merged = existingPrivileges
+            .Where(p => !pendingById.ContainsKey(p.PrivilegeId))   // keep existing not in delta
+            .Concat(deduped)                                         // add all pending (new depth wins)
+            .ToArray();
+
+        var request = new ReplacePrivilegesRoleRequest
         {
             RoleId = roleId,
-            Privileges = deduped
+            Privileges = merged
         };
 
         try
         {
             service.Execute(request);
-            log?.Invoke($"  Added {addedPrivileges.Count} privilege(s) to role '{def.RoleName}'.");
+            log?.Invoke($"  Replaced role privileges: {existingPrivileges.Length} existing + {deduped.Length} pending → {merged.Length} total.");
         }
         catch (FaultException<OrganizationServiceFault> ex)
         {
             throw new InvalidOperationException(
-                $"Failed to add privileges to role '{def.RoleName}': {ex.Detail.Message}", ex);
+                $"Failed to replace privileges on role '{def.RoleName}': {ex.Detail.Message}", ex);
         }
+
+        // Verify that every pending privilege actually persisted.
+        VerifyPrivilegesPersisted(service, roleId, deduped, privilegeNames, def.RoleName, log);
     }
 
     /// <summary>
@@ -272,6 +291,10 @@ public static class SecurityRoleWriter
 
     private static Guid? FindRoleByName(IOrganizationService service, string roleName)
     {
+        // Always target the root BU copy (parentroleid = null).
+        // AddPrivilegesRoleRequest on the root automatically propagates to all child-BU copies.
+        // Targeting a child copy instead would silently succeed but leave the root (and other
+        // child copies) without the privilege — users in the root BU would never see it.
         var query = new QueryExpression("role")
         {
             ColumnSet = new ColumnSet("roleid"),
@@ -279,22 +302,17 @@ public static class SecurityRoleWriter
             {
                 Conditions =
                 {
-                    new ConditionExpression("name", ConditionOperator.Equal, roleName)
+                    new ConditionExpression("name", ConditionOperator.Equal, roleName),
+                    new ConditionExpression("parentroleid", ConditionOperator.Null)
                 }
             },
-            Orders = { new OrderExpression("modifiedon", OrderType.Descending) },
-            TopCount = 10
+            TopCount = 1
         };
 
-        // Prefer the role instance that has the most privileges (root BU)
-        // by joining roleprivileges — or just pick the first one with parentroleid = null
         var results = service.RetrieveMultiple(query);
 
-        // Try to find the root role (parentroleid is null for root BU roles)
         foreach (var role in results.Entities)
         {
-            // The root BU copy typically has parentroleid = null
-            // Just return the first match — AddPrivilegesRoleRequest propagates to child roles
             return role.Id;
         }
 
@@ -345,26 +363,71 @@ public static class SecurityRoleWriter
     }
 
     /// <summary>
-    /// Resolves a privilege by entity name, falling back to the base Activity privilege
-    /// for custom activity entities that inherit from activitypointer.
+    /// Resolves a privilege by entity name.
+    /// Falls back to (1) the generic Activity privilege for custom activity entities, then
+    /// (2) entity metadata, which handles system entities with non-standard privilege naming
+    /// (e.g. 'systemuser' entity → 'prvAppendToUser', not 'prvAppendToSystemUser').
     /// </summary>
     private static Guid? ResolvePrivilege(IOrganizationService service, string access, string entityLogicalName, Action<string>? log)
     {
         var privilegeName = MapAccessToPrivilegeName(access, entityLogicalName);
         var id = FindPrivilegeByName(service, privilegeName);
+        if (id != null) return id;
 
-        if (id == null)
+        // Try the generic Activity privilege — custom activity entities use it
+        var activityPrivilegeName = MapAccessToPrivilegeName(access, "Activity");
+        id = FindPrivilegeByName(service, activityPrivilegeName);
+        if (id != null)
         {
-            // Try the generic Activity privilege — custom activity entities use it
-            var activityPrivilegeName = MapAccessToPrivilegeName(access, "Activity");
-            id = FindPrivilegeByName(service, activityPrivilegeName);
-            if (id != null)
-            {
-                log?.Invoke($"  Resolved '{privilegeName}' → '{activityPrivilegeName}' (activity entity)");
-            }
+            log?.Invoke($"  Resolved '{privilegeName}' → '{activityPrivilegeName}' (activity entity)");
+            return id;
         }
 
+        // Fall back to entity metadata — system entities often use a different privilege suffix
+        // (e.g. 'systemuser' entity has 'prvAppendToUser', 'prvReadUser', etc.)
+        id = ResolvePrivilegeFromEntityMetadata(service, access, entityLogicalName, log);
         return id;
+    }
+
+    private static Guid? ResolvePrivilegeFromEntityMetadata(
+        IOrganizationService service, string access, string entityLogicalName, Action<string>? log)
+    {
+        PrivilegeType? privilegeType = access.ToLowerInvariant() switch
+        {
+            "read"           => PrivilegeType.Read,
+            "write"          => PrivilegeType.Write,
+            "update"         => PrivilegeType.Write,
+            "create"         => PrivilegeType.Create,
+            "delete"         => PrivilegeType.Delete,
+            "append"         => PrivilegeType.Append,
+            "appendto"       => PrivilegeType.AppendTo,
+            "assign"         => PrivilegeType.Assign,
+            "share"          => PrivilegeType.Share,
+            _                => null
+        };
+        if (privilegeType == null) return null;
+
+        try
+        {
+            var response = (RetrieveEntityResponse)service.Execute(new RetrieveEntityRequest
+            {
+                LogicalName = entityLogicalName,
+                EntityFilters = EntityFilters.Privileges
+            });
+
+            var match = response.EntityMetadata.Privileges
+                .FirstOrDefault(p => p.PrivilegeType == privilegeType.Value);
+
+            if (match != null)
+                log?.Invoke($"  Resolved via entity metadata: '{entityLogicalName}' {access} → '{match.Name}' ({match.PrivilegeId})");
+
+            return match?.PrivilegeId;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"  Entity metadata lookup failed for '{entityLogicalName}': {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -461,6 +524,75 @@ public static class SecurityRoleWriter
             throw new InvalidOperationException(
                 $"Failed to delete role '{def.RoleName}' ({roleId}): {ex.Detail.Message}", ex);
         }
+    }
+
+    private static RolePrivilege[] FetchExistingRolePrivileges(IOrganizationService service, Guid roleId)
+    {
+        // roleprivileges.privilegedepthmask uses bit-flags (1=Basic,2=Local,4=Deep,8=Global)
+        // which differ from PrivilegeDepth enum values (Basic=0,Local=1,Deep=2,Global=8).
+        var q = new QueryExpression("roleprivileges")
+        {
+            ColumnSet = new ColumnSet("privilegeid", "privilegedepthmask"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("roleid", ConditionOperator.Equal, roleId) }
+            }
+        };
+        return service.RetrieveMultiple(q).Entities
+            .Select(e => new RolePrivilege
+            {
+                PrivilegeId = e.GetAttributeValue<Guid>("privilegeid"),
+                Depth = MaskToDepth(e.GetAttributeValue<int>("privilegedepthmask"))
+            })
+            .Where(p => p.PrivilegeId != Guid.Empty)
+            .ToArray();
+    }
+
+    private static PrivilegeDepth MaskToDepth(int mask) => mask switch
+    {
+        1 => PrivilegeDepth.Basic,
+        2 => PrivilegeDepth.Local,
+        4 => PrivilegeDepth.Deep,
+        _ => PrivilegeDepth.Global   // 8
+    };
+
+    private static void VerifyPrivilegesPersisted(
+        IOrganizationService service,
+        Guid roleId,
+        RolePrivilege[] expected,
+        Dictionary<Guid, string> privilegeNames,
+        string roleName,
+        Action<string>? log)
+    {
+        // Query roleprivileges directly — RetrieveRolePrivilegesRequest is not available in this SDK version.
+        var q = new QueryExpression("roleprivileges")
+        {
+            ColumnSet = new ColumnSet("privilegeid"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("roleid", ConditionOperator.Equal, roleId) }
+            }
+        };
+        var rows = service.RetrieveMultiple(q);
+        var grantedIds = rows.Entities
+            .Select(e => e.GetAttributeValue<Guid>("privilegeid"))
+            .Where(id => id != Guid.Empty)
+            .ToHashSet();
+
+        var missing = expected.Select(p => p.PrivilegeId).Where(id => !grantedIds.Contains(id)).ToList();
+
+        if (missing.Count > 0)
+        {
+            var missingList = string.Join(", ", missing.Select(id =>
+                privilegeNames.TryGetValue(id, out var name) ? name : id.ToString()));
+            throw new InvalidOperationException(
+                $"Post-commit verification failed for role '{roleName}': " +
+                $"privilege(s) not present after applying — {missingList}. " +
+                "The AddPrivilegesRoleRequest call silently dropped them. " +
+                "The pending file has NOT been archived — retry the commit.");
+        }
+
+        log?.Invoke($"  Verified: all {expected.Length} privilege(s) confirmed in Dataverse.");
     }
 
     private static PrivilegeDepth ParseDepth(string depth)

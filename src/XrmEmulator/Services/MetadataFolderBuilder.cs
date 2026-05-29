@@ -41,6 +41,11 @@ public static class MetadataFolderBuilder
         var serializer = new DataContractSerializer(typeof(MetadataSkeleton));
         MetadataSkeleton? combined = null;
 
+        // Track seen security role IDs across all solutions to avoid duplicates.
+        // The same role GUID can appear in multiple solutions (e.g. shared system roles),
+        // and XrmMockup's Security ctor does ToDictionary(s => s.RoleId) which throws on dupes.
+        var seenRoleIds = new HashSet<Guid>();
+
         foreach (var metadataFile in metadataFiles)
         {
             MetadataSkeleton skeleton;
@@ -60,12 +65,20 @@ public static class MetadataFolderBuilder
 
             // Copy SecurityRoles and Workflows from this solution's directory
             var solutionDir = Path.GetDirectoryName(metadataFile)!;
-            CopyXmlFiles(Path.Combine(solutionDir, "SecurityRoles"), securityRolesDir);
+            CopySecurityRoleFiles(Path.Combine(solutionDir, "SecurityRoles"), securityRolesDir, seenRoleIds);
             CopyXmlFiles(Path.Combine(solutionDir, "Workflows"), workflowsDir);
 
             // Convert solution export workflows/business rules (XAML format) to DataContract format
             ConvertSolutionExportWorkflows(solutionDir, workflowsDir);
         }
+
+        // Normalise MetaPlugin fields to the convention MetadataRegistrationStrategy expects:
+        //   AssemblyName          = fully-qualified type name   (e.g. "My.Assembly.MyPlugin")
+        //   PluginTypeAssemblyName = short assembly name         (e.g. "My.Assembly")
+        // Legacy MetadataSync exports stored these in the opposite order.  Detect the swap by
+        // checking whether PluginTypeAssemblyName starts with AssemblyName + "." which means
+        // PluginTypeAssemblyName holds the type name and AssemblyName holds the assembly name.
+        NormalizePluginFields(combined!);
 
         // Ensure required system entities exist (XrmMockup needs these to initialize)
         EnsureRequiredSystemEntities(combined!);
@@ -122,6 +135,22 @@ public static class MetadataFolderBuilder
         }
 
         return results;
+    }
+
+    private static void NormalizePluginFields(MetadataSkeleton skeleton)
+    {
+        if (skeleton.Plugins == null) return;
+
+        foreach (var plugin in skeleton.Plugins)
+        {
+            if (!string.IsNullOrEmpty(plugin.AssemblyName)
+                && !string.IsNullOrEmpty(plugin.PluginTypeAssemblyName)
+                && plugin.PluginTypeAssemblyName.StartsWith(plugin.AssemblyName + ".", StringComparison.Ordinal))
+            {
+                (plugin.AssemblyName, plugin.PluginTypeAssemblyName) =
+                    (plugin.PluginTypeAssemblyName, plugin.AssemblyName);
+            }
+        }
     }
 
     /// <summary>
@@ -202,6 +231,20 @@ public static class MetadataFolderBuilder
             CreateAttribute<LookupAttributeMetadata>("objectid", AttributeTypeCode.Lookup),
             CreateAttribute<IntegerAttributeMetadata>("accessrightsmask", AttributeTypeCode.Integer),
             CreateAttribute<StringAttributeMetadata>("objecttypecode", AttributeTypeCode.String));
+
+        // Environment variable tables — needed by any plugin that calls GetEnvironmentVariable.
+        // These are standard Dataverse entities but are not included in solution exports.
+        EnsureEntity(skeleton, "environmentvariabledefinition", OwnershipTypes.OrganizationOwned,
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("environmentvariabledefinitionid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<StringAttributeMetadata>("schemaname", AttributeTypeCode.String),
+            CreateAttribute<StringAttributeMetadata>("defaultvalue", AttributeTypeCode.String),
+            CreateAttribute<StringAttributeMetadata>("displayname", AttributeTypeCode.String),
+            CreateAttribute<IntegerAttributeMetadata>("type", AttributeTypeCode.Integer));
+
+        EnsureEntity(skeleton, "environmentvariablevalue", OwnershipTypes.OrganizationOwned,
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("environmentvariablevalueid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<LookupAttributeMetadata>("environmentvariabledefinitionid", AttributeTypeCode.Lookup),
+            CreateAttribute<StringAttributeMetadata>("value", AttributeTypeCode.String));
 
         // Ensure BaseOrganization entity exists
         if (skeleton.BaseOrganization == null || skeleton.BaseOrganization.Attributes.Count == 0)
@@ -374,6 +417,45 @@ public static class MetadataFolderBuilder
             entity["processtriggerformid"] = formId;
 
         return entity;
+    }
+
+    /// <summary>
+    /// Copies security role XML files, deduplicating by RoleId so that the same role appearing
+    /// in multiple solutions only gets copied once. XrmMockup's Security ctor does
+    /// ToDictionary(s => s.RoleId) and crashes if the same GUID appears twice.
+    /// </summary>
+    private static void CopySecurityRoleFiles(string sourceDir, string destDir, HashSet<Guid> seenRoleIds)
+    {
+        if (!Directory.Exists(sourceDir)) return;
+
+        var roleSerializer = new DataContractSerializer(typeof(SecurityRole));
+        foreach (var file in Directory.GetFiles(sourceDir, "*.xml"))
+        {
+            Guid roleId;
+            try
+            {
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var role = (SecurityRole)roleSerializer.ReadObject(stream)!;
+                roleId = role.RoleId;
+            }
+            catch
+            {
+                // Can't parse — fall back to filename-based dedup
+                var fallbackDest = Path.Combine(destDir, Path.GetFileName(file));
+                if (!File.Exists(fallbackDest))
+                    File.Copy(file, fallbackDest);
+                continue;
+            }
+
+            if (!seenRoleIds.Add(roleId))
+                continue; // Same RoleId already written from a previous solution
+
+            var destFile = Path.Combine(destDir, Path.GetFileName(file));
+            if (File.Exists(destFile))
+                destFile = Path.Combine(destDir, roleId.ToString("N") + ".xml");
+
+            File.Copy(file, destFile);
+        }
     }
 
     private static void CopyXmlFiles(string sourceDir, string destDir)

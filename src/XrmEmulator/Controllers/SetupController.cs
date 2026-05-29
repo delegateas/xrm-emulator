@@ -4,7 +4,9 @@ using DG.Tools.XrmMockup;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Query;
+using XrmEmulator.Services;
 
 namespace XrmEmulator.Controllers;
 
@@ -14,15 +16,18 @@ public sealed class SetupController : ControllerBase
 {
     private readonly XrmMockup365 _xrmMockup;
     private readonly IOrganizationServiceAsync _organizationService;
+    private readonly ISnapshotService _snapshotService;
     private readonly ILogger<SetupController> _logger;
 
     public SetupController(
         XrmMockup365 xrmMockup,
         IOrganizationServiceAsync organizationService,
+        ISnapshotService snapshotService,
         ILogger<SetupController> logger)
     {
         _xrmMockup = xrmMockup;
         _organizationService = organizationService;
+        _snapshotService = snapshotService;
         _logger = logger;
     }
 
@@ -224,6 +229,48 @@ public sealed class SetupController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Creates minimal seed data (test account + lead) directly via the admin org service.
+    /// Idempotent — uses UpsertRequest so calling it multiple times is safe.
+    /// </summary>
+    [HttpPost("seed")]
+    public async Task<IActionResult> SeedData()
+    {
+        var results = new List<string>();
+        try
+        {
+            // Test account
+            var accountId = new Guid("10000000-0000-0000-0000-000000000001");
+            var account = new Entity("account", accountId)
+            {
+                ["name"] = "Test Partner A/S",
+            };
+            await _organizationService.ExecuteAsync(new UpsertRequest { Target = account }).ConfigureAwait(false);
+            results.Add($"account {accountId} upserted");
+
+            // Test lead linked to account
+            var leadId = new Guid("20000000-0000-0000-0000-000000000001");
+            var lead = new Entity("lead", leadId)
+            {
+                ["firstname"] = "Test",
+                ["lastname"] = "Testsen",
+                ["emailaddress1"] = "test@testsen.dk",
+                ["kf_partner"] = new EntityReference("account", accountId),
+            };
+            await _organizationService.ExecuteAsync(new UpsertRequest { Target = lead }).ConfigureAwait(false);
+            results.Add($"lead {leadId} upserted");
+
+            _snapshotService.MarkDirty();
+            _logger.LogInformation("Seed data created: {Results}", string.Join(", ", results));
+            return Ok(new { seeded = results });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Seed data failed");
+            return StatusCode(500, new { error = ex.Message, partial = results });
+        }
+    }
+
     private async Task<List<Entity>> GetSecurityRoles()
     {
         try
@@ -287,3 +334,4 @@ public sealed class SetupController : ControllerBase
     private static string Encode(string? value) =>
         WebUtility.HtmlEncode(value ?? string.Empty);
 }
+

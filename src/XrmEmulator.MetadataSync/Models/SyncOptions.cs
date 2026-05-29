@@ -13,4 +13,5 @@ public record SyncOptions
     public bool IncludeOrganizationData { get; init; }
     public bool IncludeSolutionExport { get; init; }
     public bool IncludeRibbonExport { get; init; }
+    public bool IncludeOrgStructure { get; init; }
 }

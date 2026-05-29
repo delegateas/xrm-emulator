@@ -174,6 +174,19 @@ public class SolutionMetadataService
             }
         }
 
+        // Parse global option sets (OptionSets/ directory)
+        var globalOptionSets = new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
+        var optionSetsDir = Path.Combine(solDir, "OptionSets");
+        if (Directory.Exists(optionSetsDir))
+        {
+            foreach (var osFile in Directory.GetFiles(optionSetsDir, "*.xml"))
+            {
+                var (name, options) = ParseOptionSetFile(osFile);
+                if (name != null)
+                    globalOptionSets[name] = options;
+            }
+        }
+
         // Parse Entities
         var entitiesDir = Path.Combine(solDir, "Entities");
         if (Directory.Exists(entitiesDir))
@@ -183,7 +196,7 @@ public class SolutionMetadataService
                 var entityFile = Path.Combine(entityDir, "Entity.xml");
                 if (File.Exists(entityFile))
                 {
-                    var entity = ParseEntity(entityFile);
+                    var entity = ParseEntity(entityFile, globalOptionSets);
                     if (entity != null)
                     {
                         // Merge: keep existing attributes, add new ones
@@ -396,7 +409,29 @@ public class SolutionMetadataService
             ?.Attribute("Title")?.Value;
     }
 
-    private static CrmEntity? ParseEntity(string filePath)
+    private static (string? Name, Dictionary<int, string> Options) ParseOptionSetFile(string filePath)
+    {
+        var doc = XDocument.Load(filePath);
+        var root = doc.Root;
+        if (root == null) return (null, []);
+
+        var name = root.Attribute("Name")?.Value;
+        if (string.IsNullOrEmpty(name)) return (null, []);
+
+        var options = new Dictionary<int, string>();
+        foreach (var optEl in root.Element("options")?.Elements("option") ?? [])
+        {
+            if (!int.TryParse(optEl.Attribute("value")?.Value, out var value)) continue;
+            var label = optEl.Element("labels")
+                ?.Elements("label")
+                .FirstOrDefault(l => (int?)l.Attribute("languagecode") == DefaultLcid)
+                ?.Attribute("description")?.Value ?? value.ToString();
+            options[value] = label;
+        }
+        return (name, options);
+    }
+
+    private static CrmEntity? ParseEntity(string filePath, Dictionary<string, Dictionary<int, string>>? globalOptionSets = null)
     {
         var doc = XDocument.Load(filePath);
         var root = doc.Root;
@@ -424,11 +459,20 @@ public class SolutionMetadataService
 
             var attrType = attrEl.Element("Type")?.Value ?? "nvarchar";
 
+            IReadOnlyDictionary<int, string> options = new Dictionary<int, string>();
+            if (attrType is "picklist" or "state" or "status")
+            {
+                var osName = attrEl.Element("OptionSetName")?.Value;
+                if (osName != null && globalOptionSets != null && globalOptionSets.TryGetValue(osName, out var osOptions))
+                    options = osOptions;
+            }
+
             attributes[attrLogicalName] = new CrmAttribute
             {
                 LogicalName = attrLogicalName,
                 DisplayName = attrDisplayName,
-                Type = attrType
+                Type = attrType,
+                Options = options
             };
         }
 

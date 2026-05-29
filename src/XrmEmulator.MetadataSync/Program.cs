@@ -8241,6 +8241,7 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
                 IncludeSecurityRoles = true,
                 IncludeOptionSets = true,
                 IncludeOrganizationData = true,
+                IncludeOrgStructure = true,
                 IncludeSolutionExport = true,
                 IncludeRibbonExport = true
             };
@@ -8287,6 +8288,7 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
     table.AddRow("Security Roles", syncOptions.IncludeSecurityRoles ? "Yes" : "No");
     table.AddRow("Global Option Sets", syncOptions.IncludeOptionSets ? "Yes" : "No");
     table.AddRow("Currencies & Organization", syncOptions.IncludeOrganizationData ? "Yes" : "No");
+    table.AddRow("Business Units & Teams", syncOptions.IncludeOrgStructure ? "Yes" : "No");
     table.AddRow("Solution Export & Unpack", syncOptions.IncludeSolutionExport ? "Yes" : "No");
     table.AddRow("Output Directory", syncOptions.OutputDirectory);
 
@@ -8318,6 +8320,7 @@ static void ExecuteSync(IOrganizationService client, SyncOptions syncOptions)
     List<Entity>? currencies = null;
     List<Entity>? workflows = null;
     List<SecurityRole>? securityRoles = null;
+    XrmEmulator.MetadataSync.Models.OrgStructureData? orgStructure = null;
 
     AnsiConsole.WriteLine();
 
@@ -8380,6 +8383,14 @@ static void ExecuteSync(IOrganizationService client, SyncOptions syncOptions)
                 orgTask.Value = 100;
             }
 
+            // Business Units & Teams
+            if (syncOptions.IncludeOrgStructure)
+            {
+                var orgStructureTask = ctx.AddTask("[green]Business Units & Teams[/]", maxValue: 100);
+                orgStructure = XrmEmulator.MetadataSync.Readers.OrgStructureReader.Read(client);
+                orgStructureTask.Value = 100;
+            }
+
             // Serialization
             var serializeTask = ctx.AddTask("[green]Serializing output[/]", maxValue: 100);
             MetadataSerializer.Serialize(
@@ -8393,6 +8404,14 @@ static void ExecuteSync(IOrganizationService client, SyncOptions syncOptions)
                 currencies,
                 workflows,
                 securityRoles);
+
+            if (orgStructure is not null)
+            {
+                var jsonPath = Path.Combine(Path.GetFullPath(syncOptions.OutputDirectory), "OrgStructure.json");
+                File.WriteAllText(jsonPath, JsonSerializer.Serialize(orgStructure,
+                    new JsonSerializerOptions { WriteIndented = true }));
+            }
+
             serializeTask.Value = 100;
 
             // Solution Export & Unpack

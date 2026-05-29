@@ -15,4 +15,5 @@ public record CrmAttribute
     public required string LogicalName { get; init; }
     public required string DisplayName { get; init; }
     public required string Type { get; init; }
+    public IReadOnlyDictionary<int, string> Options { get; init; } = new Dictionary<int, string>();
 }

@@ -33,6 +33,27 @@ public class SnapshotController : ControllerBase
     }
 
     /// <summary>
+    /// Trigger an immediate snapshot save to the configured file path.
+    /// Used by the Aspire seed hook after seeding data.
+    /// </summary>
+    [HttpPost]
+    [HttpPost("save")]
+    public async Task<IActionResult> SaveSnapshot(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _snapshotService.SaveNowAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("Snapshot saved on demand");
+            return Ok(new { saved = true, timestamp = DateTimeOffset.UtcNow });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save snapshot on demand");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Download current XRM snapshot as ZIP file.
     /// </summary>
     /// <returns>ZIP file stream containing XRM state</returns>

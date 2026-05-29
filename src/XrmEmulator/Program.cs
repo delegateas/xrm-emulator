@@ -140,6 +140,9 @@ builder.Services.AddSingleton<ISnapshotService, SnapshotService>();
 builder.Services.AddHostedService<SnapshotService>(provider =>
     (SnapshotService)provider.GetRequiredService<ISnapshotService>());
 
+// Initialize BU hierarchy and teams from OrgStructure.json after snapshot restore
+builder.Services.AddHostedService<OrgStructureInitializer>();
+
 // Add XML serialization services for SOAP controller
 builder.Services.AddScoped<IRequestMapper, RequestMapper>();
 builder.Services.AddScoped<IXmlRequestDeserializer, XmlRequestDeserializer>();

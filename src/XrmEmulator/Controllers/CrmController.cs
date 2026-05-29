@@ -534,14 +534,15 @@ public sealed class CrmController : ControllerBase
             {
                 foreach (var record in result.Entities)
                 {
-                    html.AppendLine("<tr>");
+                    var recordUrl = $"/crm/{Encode(app.UniqueName)}/{Encode(activeView.EntityName)}/{record.Id}";
+                    html.AppendLine($"<tr class='grid-row' ondblclick=\"location.href='{recordUrl}'\">");
                     var isFirst = true;
                     foreach (var col in activeView.Columns)
                     {
                         var value = record.Contains(col.Name) ? FormatGridValue(record[col.Name]) : "";
                         if (isFirst)
                         {
-                            html.AppendLine($"<td><a href='/crm/{Encode(app.UniqueName)}/{Encode(activeView.EntityName)}/{record.Id}'>{Encode(value)}</a></td>");
+                            html.AppendLine($"<td><a href='{recordUrl}'>{Encode(value)}</a></td>");
                             isFirst = false;
                         }
                         else
@@ -618,13 +619,12 @@ public sealed class CrmController : ControllerBase
                             continue;
                         }
 
-                        var label = field.Label
-                            ?? entityMeta?.Attributes.GetValueOrDefault(field.DataFieldName)?.DisplayName
-                            ?? field.DataFieldName;
-                        var attrType = entityMeta?.Attributes.GetValueOrDefault(field.DataFieldName)?.Type ?? "nvarchar";
+                        var fieldAttr = entityMeta?.Attributes.GetValueOrDefault(field.DataFieldName);
+                        var label = field.Label ?? fieldAttr?.DisplayName ?? field.DataFieldName;
+                        var attrType = fieldAttr?.Type ?? "nvarchar";
                         var value = record.Contains(field.DataFieldName) ? record[field.DataFieldName] : null;
 
-                        RenderFormField(html, field.DataFieldName, label, attrType, value);
+                        RenderFormField(html, field.DataFieldName, label, attrType, value, fieldAttr?.Options);
                     }
                     html.AppendLine("</div>");
                 }
@@ -836,9 +836,10 @@ public sealed class CrmController : ControllerBase
 
         foreach (var attr in record.Attributes.OrderBy(a => a.Key))
         {
-            var label = entityMeta?.Attributes.GetValueOrDefault(attr.Key)?.DisplayName ?? attr.Key;
-            var attrType = entityMeta?.Attributes.GetValueOrDefault(attr.Key)?.Type ?? "nvarchar";
-            RenderFormField(html, attr.Key, label, attrType, attr.Value);
+            var attrMeta = entityMeta?.Attributes.GetValueOrDefault(attr.Key);
+            var label = attrMeta?.DisplayName ?? attr.Key;
+            var attrType = attrMeta?.Type ?? "nvarchar";
+            RenderFormField(html, attr.Key, label, attrType, attr.Value, attrMeta?.Options);
         }
 
         html.AppendLine("</div>");
@@ -858,7 +859,7 @@ public sealed class CrmController : ControllerBase
                 .Where(a => a.Type is not ("primarykey" or "uniqueidentifier" or "lookup" or "owner" or "customer"))
                 .OrderBy(a => a.LogicalName))
             {
-                RenderFormField(html, attr.LogicalName, attr.DisplayName ?? attr.LogicalName, attr.Type, null);
+                RenderFormField(html, attr.LogicalName, attr.DisplayName ?? attr.LogicalName, attr.Type, null, attr.Options);
             }
         }
 
@@ -866,7 +867,7 @@ public sealed class CrmController : ControllerBase
         html.AppendLine("</div>");
     }
 
-    private static void RenderFormField(StringBuilder html, string fieldName, string label, string attrType, object? value)
+    private static void RenderFormField(StringBuilder html, string fieldName, string label, string attrType, object? value, IReadOnlyDictionary<int, string>? options = null)
     {
         html.AppendLine("<div class='form-field'>");
         html.AppendLine($"<label for='{Encode(fieldName)}'>{Encode(label)}</label>");
@@ -902,8 +903,23 @@ public sealed class CrmController : ControllerBase
             case "picklist":
             case "state":
             case "status":
-                var optVal = value is OptionSetValue osv ? osv.Value.ToString() : "";
-                html.AppendLine($"<input type='number' name='{Encode(fieldName)}' id='{Encode(fieldName)}' step='1' value='{Encode(optVal)}' />");
+                var currentOsv = value is OptionSetValue osv ? osv.Value : (int?)null;
+                if (options != null && options.Count > 0)
+                {
+                    html.AppendLine($"<select name='{Encode(fieldName)}' id='{Encode(fieldName)}'>");
+                    html.AppendLine("<option value=''></option>");
+                    foreach (var (optValue, optLabel) in options.OrderBy(o => o.Key))
+                    {
+                        var selected = currentOsv == optValue ? " selected" : "";
+                        html.AppendLine($"<option value='{optValue}'{selected}>{Encode(optLabel)}</option>");
+                    }
+                    html.AppendLine("</select>");
+                }
+                else
+                {
+                    var optVal = currentOsv?.ToString() ?? "";
+                    html.AppendLine($"<input type='number' name='{Encode(fieldName)}' id='{Encode(fieldName)}' step='1' value='{Encode(optVal)}' />");
+                }
                 break;
             case "lookup":
             case "owner":

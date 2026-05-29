@@ -1,3 +1,4 @@
+using System.Net.Http;
 using DG.Tools.XrmMockup;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
@@ -6,6 +7,8 @@ namespace XrmEmulator.MetadataSync.Readers;
 
 public static class PluginReader
 {
+    private const int MaxRetries = 5;
+
     public static List<MetaPlugin> Read(IOrganizationService service, HashSet<string> entityNames)
     {
         var plugins = new List<MetaPlugin>();
@@ -43,9 +46,30 @@ public static class PluginReader
             }
         };
 
-        var results = service.RetrieveMultiple(query);
+        var allSteps = new List<Entity>();
+        var pageNumber = 1;
+        string? pagingCookie = null;
+        while (true)
+        {
+            query.PageInfo = new PagingInfo
+            {
+                Count = 50,
+                PageNumber = pageNumber,
+                PagingCookie = pagingCookie
+            };
+            var page = RetryRetrieve(service, query);
+            allSteps.AddRange(page.Entities);
+            if (!page.MoreRecords) break;
+            pagingCookie = page.PagingCookie;
+            pageNumber++;
+        }
 
-        foreach (var step in results.Entities)
+        // Fetch all step images in one paged query rather than one call per step.
+        // The N+1 pattern (one HTTP call per step) causes the server to drop the
+        // connection mid-export (HttpIOException: response ended prematurely).
+        var allImages = RetrieveAllImages(service);
+
+        foreach (var step in allSteps)
         {
             var primaryEntity = GetAliasedValue<string>(step, "filter.primaryobjecttypecode") ?? "none";
 
@@ -53,7 +77,7 @@ public static class PluginReader
             if (primaryEntity != "none" && !entityNames.Contains(primaryEntity))
                 continue;
 
-            var images = RetrieveImages(service, step.Id);
+            allImages.TryGetValue(step.Id, out var images);
 
             var plugin = new MetaPlugin
             {
@@ -64,11 +88,13 @@ public static class PluginReader
                 FilteredAttributes = step.GetAttributeValue<string>("filteringattributes") ?? string.Empty,
                 AsyncAutoDelete = step.GetAttributeValue<bool>("asyncautodelete"),
                 MessageName = GetAliasedValue<string>(step, "message.name") ?? string.Empty,
-                AssemblyName = GetAliasedValue<string>(step, "plugintype.assemblyname") ?? string.Empty,
-                PluginTypeAssemblyName = GetAliasedValue<string>(step, "plugintype.name") ?? string.Empty,
+                // MetadataRegistrationStrategy checks: AssemblyName == pluginType.FullName (full type name)
+                // and PluginTypeAssemblyName == pluginType.Assembly.GetName().Name (short assembly name).
+                AssemblyName = GetAliasedValue<string>(step, "plugintype.name") ?? string.Empty,
+                PluginTypeAssemblyName = GetAliasedValue<string>(step, "plugintype.assemblyname") ?? string.Empty,
                 PrimaryEntity = primaryEntity,
                 ImpersonatingUserId = step.GetAttributeValue<EntityReference>("impersonatinguserid")?.Id,
-                Images = images
+                Images = images ?? []
             };
 
             plugins.Add(plugin);
@@ -77,35 +103,76 @@ public static class PluginReader
         return plugins;
     }
 
-    private static List<MetaImage> RetrieveImages(IOrganizationService service, Guid stepId)
+    /// <summary>
+    /// Fetches all sdkmessageprocessingstepimage records in pages and returns them
+    /// grouped by sdkmessageprocessingstepid.
+    /// </summary>
+    private static Dictionary<Guid, List<MetaImage>> RetrieveAllImages(IOrganizationService service)
     {
         var query = new QueryExpression("sdkmessageprocessingstepimage")
         {
-            ColumnSet = new ColumnSet("attributes", "entityalias", "name", "imagetype"),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression("sdkmessageprocessingstepid", ConditionOperator.Equal, stepId)
-                }
-            }
+            ColumnSet = new ColumnSet("sdkmessageprocessingstepid", "attributes", "entityalias", "name", "imagetype"),
         };
 
-        var results = service.RetrieveMultiple(query);
-        var images = new List<MetaImage>();
+        var byStep = new Dictionary<Guid, List<MetaImage>>();
+        var pageNumber = 1;
+        string? pagingCookie = null;
 
-        foreach (var image in results.Entities)
+        while (true)
         {
-            images.Add(new MetaImage
+            query.PageInfo = new PagingInfo
             {
-                Attributes = image.GetAttributeValue<string>("attributes") ?? string.Empty,
-                EntityAlias = image.GetAttributeValue<string>("entityalias") ?? string.Empty,
-                Name = image.GetAttributeValue<string>("name") ?? string.Empty,
-                ImageType = image.GetAttributeValue<OptionSetValue>("imagetype")?.Value ?? 0
-            });
+                Count = 250,
+                PageNumber = pageNumber,
+                PagingCookie = pagingCookie
+            };
+
+            var page = RetryRetrieve(service, query);
+
+            foreach (var image in page.Entities)
+            {
+                var stepRef = image.GetAttributeValue<EntityReference>("sdkmessageprocessingstepid");
+                if (stepRef is null) continue;
+
+                if (!byStep.TryGetValue(stepRef.Id, out var list))
+                    byStep[stepRef.Id] = list = [];
+
+                list.Add(new MetaImage
+                {
+                    Attributes = image.GetAttributeValue<string>("attributes") ?? string.Empty,
+                    EntityAlias = image.GetAttributeValue<string>("entityalias") ?? string.Empty,
+                    Name = image.GetAttributeValue<string>("name") ?? string.Empty,
+                    ImageType = image.GetAttributeValue<OptionSetValue>("imagetype")?.Value ?? 0
+                });
+            }
+
+            if (!page.MoreRecords) break;
+            pagingCookie = page.PagingCookie;
+            pageNumber++;
         }
 
-        return images;
+        return byStep;
+    }
+
+    /// <summary>
+    /// Wraps RetrieveMultiple with exponential-backoff retries for transient
+    /// HttpIOException (ResponseEnded) errors that occur on large Dataverse orgs.
+    /// </summary>
+    private static EntityCollection RetryRetrieve(IOrganizationService service, QueryBase query)
+    {
+        var delay = TimeSpan.FromSeconds(2);
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return service.RetrieveMultiple(query);
+            }
+            catch (HttpIOException) when (attempt < MaxRetries)
+            {
+                Thread.Sleep(delay);
+                delay *= 2;
+            }
+        }
     }
 
     private static T? GetAliasedValue<T>(Entity entity, string attributeName)
