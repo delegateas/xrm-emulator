@@ -8267,7 +8267,7 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
     var (solutionId, solutionUniqueName) = SolutionPicker.Run(clientFull);
 
     // 5. Run EntityPicker for entity selection
-    var selectedEntities = EntityPicker.Run(clientFull, solutionId);
+    var selectedEntities = EntityPicker.Run(clientFull, solutionId, solutionUniqueName);
 
     // 6. Run MetadataScopePicker for scope + output directory
     var syncOptions = MetadataScopePicker.Run(solutionId, solutionUniqueName, selectedEntities);

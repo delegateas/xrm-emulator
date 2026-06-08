@@ -1,6 +1,7 @@
 using Microsoft.Xrm.Sdk;
 using Spectre.Console;
 using XrmEmulator.MetadataSync.Readers;
+using System.IO;
 
 namespace XrmEmulator.MetadataSync.Interactive;
 
@@ -19,7 +20,7 @@ public static class EntityPicker
         "account"
     };
 
-    public static HashSet<string> Run(IOrganizationService service, Guid solutionId)
+    public static HashSet<string> Run(IOrganizationService service, Guid solutionId, string solutionUniqueName)
     {
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[bold blue]Entity Selection[/]").LeftJustified());
@@ -27,6 +28,15 @@ public static class EntityPicker
 
         AnsiConsole.MarkupLine("[grey]Retrieving solution entities...[/]");
         var solutionEntities = SolutionComponentReader.GetEntityLogicalNames(service, solutionId);
+
+        // Also pick up entities that only have sub-components in the solution (forms, views, ribbon)
+        // by reading the already-committed local export folder — these are missed by the type-1 query.
+        var localExportPath = Path.Combine("SolutionExport", solutionUniqueName, "Entities");
+        if (Directory.Exists(localExportPath))
+        {
+            foreach (var dir in Directory.GetDirectories(localExportPath))
+                solutionEntities.Add(Path.GetFileName(dir).ToLowerInvariant());
+        }
 
         // Combine solution entities with defaults
         var allEntities = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);

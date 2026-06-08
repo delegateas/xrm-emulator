@@ -588,7 +588,7 @@ public static class SecurityRoleWriter
             throw new InvalidOperationException(
                 $"Post-commit verification failed for role '{roleName}': " +
                 $"privilege(s) not present after applying — {missingList}. " +
-                "The AddPrivilegesRoleRequest call silently dropped them. " +
+                "ReplacePrivilegesRoleRequest did not persist them — check Dataverse permissions or try again. " +
                 "The pending file has NOT been archived — retry the commit.");
         }
 
