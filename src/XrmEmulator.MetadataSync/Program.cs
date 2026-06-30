@@ -4236,9 +4236,26 @@ static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, 
 
     if (!string.IsNullOrEmpty(fetchXml))
     {
-        // FetchXML mode
-        var fetchReq = new Microsoft.Xrm.Sdk.Query.FetchExpression(fetchXml);
-        results = client.RetrieveMultiple(fetchReq);
+        // FetchXML mode — page through all results (Dataverse default page is 250–5000 records).
+        var allEntities = new System.Collections.Generic.List<Microsoft.Xrm.Sdk.Entity>();
+        string? pagingCookie = null;
+        var pageNumber = 1;
+        while (true)
+        {
+            var doc = System.Xml.Linq.XDocument.Parse(fetchXml);
+            var fetch = doc.Root!;
+            fetch.Attribute("top")?.Remove(); // top and page are mutually exclusive
+            fetch.SetAttributeValue("page", pageNumber);
+            fetch.SetAttributeValue("count", "5000");
+            if (pagingCookie != null)
+                fetch.SetAttributeValue("paging-cookie", pagingCookie);
+            var page = client.RetrieveMultiple(new Microsoft.Xrm.Sdk.Query.FetchExpression(doc.ToString()));
+            allEntities.AddRange(page.Entities);
+            if (!page.MoreRecords) break;
+            pagingCookie = page.PagingCookie;
+            pageNumber++;
+        }
+        results = new Microsoft.Xrm.Sdk.EntityCollection(allEntities);
     }
     else
     {
@@ -4897,24 +4914,49 @@ static void HandleSecurityRoleDeleteCommand(string[] positionalArgs)
 
 static void HandleSecurityRoleAddCommand(string[] positionalArgs)
 {
-    if (positionalArgs.Length < 5)
+    if (positionalArgs.Length < 4)
     {
         AnsiConsole.MarkupLine("[red]Usage:[/] security-role add <role-name> <entity> <access> [depth]");
+        AnsiConsole.MarkupLine("[grey]       security-role add <role-name> <prvPrivilegeName> [depth]   (task-based privilege)[/]");
         AnsiConsole.MarkupLine("[grey]Example: security-role add \"Partner Service\" lead Create Global[/]");
+        AnsiConsole.MarkupLine("[grey]Example: security-role add \"_Role_our_basisuser\" prvSearchAvailability Basic[/]");
         Environment.Exit(1);
     }
 
     var roleName = positionalArgs[2];
-    var entity = positionalArgs[3].ToLowerInvariant();
-    var access = positionalArgs[4];
-    var depth = positionalArgs.Length > 5 ? positionalArgs[5] : "Global";
 
-    // Validate access type
-    var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share", "merge" };
-    if (!validAccess.Contains(access.ToLowerInvariant()))
+    // Task-based / miscellaneous privileges (e.g. prvSearchAvailability) have no entity +
+    // access mapping — they are referenced by raw name. Detect by the "prv" name prefix.
+    var taskPrivilege = positionalArgs[3].StartsWith("prv", StringComparison.OrdinalIgnoreCase);
+
+    string entity, access, privilegeName, depth;
+    if (taskPrivilege)
     {
-        AnsiConsole.MarkupLine($"[red]Invalid access type:[/] '{access}'. Valid: {string.Join(", ", validAccess.Select(a => char.ToUpper(a[0]) + a[1..]))}");
-        Environment.Exit(1);
+        privilegeName = positionalArgs[3];   // preserve case — e.g. prvSearchAvailability
+        entity = "";
+        access = "";
+        depth = positionalArgs.Length > 4 ? positionalArgs[4] : "Basic";
+    }
+    else
+    {
+        if (positionalArgs.Length < 5)
+        {
+            AnsiConsole.MarkupLine("[red]Usage:[/] security-role add <role-name> <entity> <access> [depth]");
+            AnsiConsole.MarkupLine("[grey]Example: security-role add \"Partner Service\" lead Create Global[/]");
+            Environment.Exit(1);
+        }
+        privilegeName = "";
+        entity = positionalArgs[3].ToLowerInvariant();
+        access = positionalArgs[4];
+        depth = positionalArgs.Length > 5 ? positionalArgs[5] : "Global";
+
+        // Validate access type
+        var validAccess = new[] { "create", "read", "write", "delete", "append", "appendto", "assign", "share", "merge" };
+        if (!validAccess.Contains(access.ToLowerInvariant()))
+        {
+            AnsiConsole.MarkupLine($"[red]Invalid access type:[/] '{access}'. Valid: {string.Join(", ", validAccess.Select(a => char.ToUpper(a[0]) + a[1..]))}");
+            Environment.Exit(1);
+        }
     }
 
     // Validate depth
@@ -4950,10 +4992,17 @@ static void HandleSecurityRoleAddCommand(string[] positionalArgs)
     }
 
     // Check for duplicate
-    var newEntry = new PrivilegeEntry { Entity = entity, Access = access, Depth = depth };
-    var duplicate = privileges.FirstOrDefault(p =>
-        p.Entity.Equals(entity, StringComparison.OrdinalIgnoreCase) &&
-        p.Access.Equals(access, StringComparison.OrdinalIgnoreCase));
+    var newEntry = taskPrivilege
+        ? new PrivilegeEntry { Privilege = privilegeName, Depth = depth }
+        : new PrivilegeEntry { Entity = entity, Access = access, Depth = depth };
+    var duplicate = taskPrivilege
+        ? privileges.FirstOrDefault(p =>
+            !string.IsNullOrWhiteSpace(p.Privilege) &&
+            p.Privilege.Equals(privilegeName, StringComparison.OrdinalIgnoreCase))
+        : privileges.FirstOrDefault(p =>
+            p.Entity.Equals(entity, StringComparison.OrdinalIgnoreCase) &&
+            p.Access.Equals(access, StringComparison.OrdinalIgnoreCase));
+    var label = taskPrivilege ? privilegeName : $"{access} on {entity}";
 
     if (duplicate != null)
     {
@@ -4962,11 +5011,11 @@ static void HandleSecurityRoleAddCommand(string[] positionalArgs)
         {
             privileges.Remove(duplicate);
             privileges.Add(newEntry);
-            AnsiConsole.MarkupLine($"[yellow]Updated existing privilege depth:[/] {access} on {entity} → {depth}");
+            AnsiConsole.MarkupLine($"[yellow]Updated existing privilege depth:[/] {label} → {depth}");
         }
         else
         {
-            AnsiConsole.MarkupLine($"[yellow]Privilege already exists:[/] {access} on {entity} ({depth})");
+            AnsiConsole.MarkupLine($"[yellow]Privilege already exists:[/] {label} ({depth})");
             return;
         }
     }
@@ -4990,8 +5039,15 @@ static void HandleSecurityRoleAddCommand(string[] positionalArgs)
 
     AnsiConsole.MarkupLine($"[green]Privilege added to pending file:[/]");
     AnsiConsole.MarkupLine($"  Role:      {roleName}");
-    AnsiConsole.MarkupLine($"  Entity:    {entity}");
-    AnsiConsole.MarkupLine($"  Access:    {access}");
+    if (taskPrivilege)
+    {
+        AnsiConsole.MarkupLine($"  Privilege: {privilegeName}");
+    }
+    else
+    {
+        AnsiConsole.MarkupLine($"  Entity:    {entity}");
+        AnsiConsole.MarkupLine($"  Access:    {access}");
+    }
     AnsiConsole.MarkupLine($"  Depth:     {depth}");
     AnsiConsole.MarkupLine($"  File:      {destPath}");
     AnsiConsole.MarkupLine($"  Total:     {privileges.Count} privilege(s) pending");
@@ -7878,7 +7934,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
             if (item.Type == CommitItemType.SecurityRoleUpdate && item.ParsedData is SecurityRoleUpdateDefinition roleDef)
             {
                 foreach (var priv in roleDef.Privileges)
-                    AnsiConsole.MarkupLine($"    [grey]  {priv.Access} on {priv.Entity} ({priv.Depth})[/]");
+                    AnsiConsole.MarkupLine($"    [grey]  {Markup.Escape(DescribePrivilege(priv))}[/]");
             }
         }
         Environment.Exit(1);
@@ -7911,7 +7967,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         {
             AnsiConsole.MarkupLine($"  [blue]{Markup.Escape(item.DisplayName)}[/]");
             foreach (var priv in roleDef.Privileges)
-                AnsiConsole.MarkupLine($"    [grey]• {priv.Access} on {priv.Entity} ({priv.Depth})[/]");
+                AnsiConsole.MarkupLine($"    [grey]• {Markup.Escape(DescribePrivilege(priv))}[/]");
             AnsiConsole.WriteLine();
         }
     }
@@ -8227,6 +8283,15 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
             {
                 foreach (var file in Directory.GetFiles(entitiesDir, "*.md"))
                     entityNames.Add(Path.GetFileNameWithoutExtension(file));
+            }
+
+            // Also pick up entities that only have sub-components in the solution (forms, views, ribbon)
+            // by scanning the committed solution export folder — these are missed by the .md file scan.
+            var solutionEntitiesDir = Path.Combine(existingBaseDir, "SolutionExport", existingMetadata.Solution.UniqueName, "Entities");
+            if (Directory.Exists(solutionEntitiesDir))
+            {
+                foreach (var dir in Directory.GetDirectories(solutionEntitiesDir))
+                    entityNames.Add(Path.GetFileName(dir).ToLowerInvariant());
             }
 
             // Re-export = full sync with everything enabled, using saved settings
@@ -8622,13 +8687,20 @@ static string GetSolutionFolder(string solutionExportDir)
 /// Format detailed description of a commit item for the confirmation table.
 /// Shows expanded info for items that benefit from detail (e.g., security role privileges).
 /// </summary>
+// Render one privilege for previews: entity privileges as "Access on entity (Depth)",
+// task-based privileges (no entity/access) as "prvName (Depth)".
+static string DescribePrivilege(PrivilegeEntry priv) =>
+    string.IsNullOrWhiteSpace(priv.Privilege)
+        ? $"{priv.Access} on {priv.Entity} ({priv.Depth})"
+        : $"{priv.Privilege} ({priv.Depth})";
+
 static string FormatCommitItemDetails(CommitItem item)
 {
     if (item.Type == CommitItemType.SecurityRoleUpdate && item.ParsedData is SecurityRoleUpdateDefinition roleDef)
     {
         var lines = new List<string> { Markup.Escape(item.DisplayName) };
         foreach (var priv in roleDef.Privileges)
-            lines.Add($"  [grey]• {Markup.Escape(priv.Access)} on {Markup.Escape(priv.Entity)} ({Markup.Escape(priv.Depth)})[/]");
+            lines.Add($"  [grey]• {Markup.Escape(DescribePrivilege(priv))}[/]");
         return string.Join("\n", lines);
     }
 

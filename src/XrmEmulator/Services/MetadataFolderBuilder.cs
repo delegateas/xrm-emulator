@@ -46,6 +46,13 @@ public static class MetadataFolderBuilder
         // and XrmMockup's Security ctor does ToDictionary(s => s.RoleId) which throws on dupes.
         var seenRoleIds = new HashSet<Guid>();
 
+        // Track seen workflow IDs across all solutions and across both emission paths
+        // (plain Workflows/*.xml copy + SolutionExport xaml conversion). The same workflow
+        // GUID can appear in multiple solutions (e.g. a shared lead workflow committed to
+        // both PartnerHierarki and KFSales); XrmMockup's Core adds each workflow entity to
+        // its DB and throws on a duplicate id.
+        var seenWorkflowIds = new HashSet<Guid>();
+
         foreach (var metadataFile in metadataFiles)
         {
             MetadataSkeleton skeleton;
@@ -66,10 +73,10 @@ public static class MetadataFolderBuilder
             // Copy SecurityRoles and Workflows from this solution's directory
             var solutionDir = Path.GetDirectoryName(metadataFile)!;
             CopySecurityRoleFiles(Path.Combine(solutionDir, "SecurityRoles"), securityRolesDir, seenRoleIds);
-            CopyXmlFiles(Path.Combine(solutionDir, "Workflows"), workflowsDir);
+            CopyWorkflowFiles(Path.Combine(solutionDir, "Workflows"), workflowsDir, seenWorkflowIds);
 
             // Convert solution export workflows/business rules (XAML format) to DataContract format
-            ConvertSolutionExportWorkflows(solutionDir, workflowsDir);
+            ConvertSolutionExportWorkflows(solutionDir, workflowsDir, seenWorkflowIds);
         }
 
         // Normalise MetaPlugin fields to the convention MetadataRegistrationStrategy expects:
@@ -82,6 +89,10 @@ public static class MetadataFolderBuilder
 
         // Ensure required system entities exist (XrmMockup needs these to initialize)
         EnsureRequiredSystemEntities(combined!);
+
+        // Ensure every N:N relationship has its intersect entity in metadata, so Associate /
+        // RetrieveMultiple against the intersect works (solution exports omit intersect entities).
+        EnsureManyToManyIntersectEntities(combined!);
 
         // Write combined Metadata.xml
         var outputPath = Path.Combine(outputDir, "Metadata.xml");
@@ -253,6 +264,36 @@ public static class MetadataFolderBuilder
         }
     }
 
+    /// <summary>
+    /// For every many-to-many relationship found on any entity, ensure the intersect entity
+    /// exists in metadata. Solution exports describe the relationship on each participating
+    /// entity but do not export the intersect entity itself; without it XrmMockup's Associate
+    /// and intersect-table queries fail with "No EntityMetadata found".
+    /// </summary>
+    private static void EnsureManyToManyIntersectEntities(MetadataSkeleton skeleton)
+    {
+        if (skeleton.EntityMetadata == null) return;
+
+        foreach (var entity in skeleton.EntityMetadata.Values.ToList())
+        {
+            if (entity.ManyToManyRelationships == null) continue;
+
+            foreach (var rel in entity.ManyToManyRelationships)
+            {
+                if (string.IsNullOrEmpty(rel.IntersectEntityName)
+                    || string.IsNullOrEmpty(rel.Entity1IntersectAttribute)
+                    || string.IsNullOrEmpty(rel.Entity2IntersectAttribute)
+                    || skeleton.EntityMetadata.ContainsKey(rel.IntersectEntityName))
+                    continue;
+
+                EnsureEntity(skeleton, rel.IntersectEntityName, OwnershipTypes.None,
+                    CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.IntersectEntityName + "id", AttributeTypeCode.Uniqueidentifier),
+                    CreateAttribute<LookupAttributeMetadata>(rel.Entity1IntersectAttribute, AttributeTypeCode.Lookup),
+                    CreateAttribute<LookupAttributeMetadata>(rel.Entity2IntersectAttribute, AttributeTypeCode.Lookup));
+            }
+        }
+    }
+
     private static void EnsureEntity(MetadataSkeleton skeleton, string logicalName,
         OwnershipTypes ownership, params AttributeMetadata[] attributes)
     {
@@ -315,7 +356,7 @@ public static class MetadataFolderBuilder
     /// Scans SolutionExport/*/Workflows/ for .xaml.data.xml files paired with .xaml files,
     /// converts them to DataContract-serialized Entity objects that XrmMockup can load.
     /// </summary>
-    private static void ConvertSolutionExportWorkflows(string solutionDir, string workflowsDir)
+    private static void ConvertSolutionExportWorkflows(string solutionDir, string workflowsDir, HashSet<Guid> seenWorkflowIds)
     {
         // Find SolutionExport directories
         var solutionExportDir = Path.Combine(solutionDir, "SolutionExport");
@@ -336,6 +377,9 @@ public static class MetadataFolderBuilder
                 {
                     var workflowEntity = ConvertWorkflowToEntity(dataFile, xamlFile);
                     if (workflowEntity == null) continue;
+
+                    // Skip if this workflow id was already emitted (plain copy or another solution).
+                    if (!seenWorkflowIds.Add(workflowEntity.Id)) continue;
 
                     // Write as DataContract-serialized Entity
                     var outputName = Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(dataFile)));
@@ -458,12 +502,24 @@ public static class MetadataFolderBuilder
         }
     }
 
-    private static void CopyXmlFiles(string sourceDir, string destDir)
+    private static readonly XNamespace ContractsNs = "http://schemas.microsoft.com/xrm/2011/Contracts";
+
+    /// <summary>
+    /// Copies plain Workflows/*.xml (DataContract-serialized Entity) into the merged folder,
+    /// skipping any workflow whose entity id was already emitted (from another solution or the
+    /// xaml-conversion path). Dedup is by entity id — the same value XrmMockup keys its DB on —
+    /// so a workflow committed to two solutions is loaded only once.
+    /// </summary>
+    private static void CopyWorkflowFiles(string sourceDir, string destDir, HashSet<Guid> seenWorkflowIds)
     {
         if (!Directory.Exists(sourceDir)) return;
 
         foreach (var file in Directory.GetFiles(sourceDir, "*.xml"))
         {
+            var id = TryGetWorkflowEntityId(file);
+            if (id.HasValue && !seenWorkflowIds.Add(id.Value))
+                continue; // already emitted this workflow id
+
             var destFile = Path.Combine(destDir, Path.GetFileName(file));
             // Don't overwrite — first solution's version wins (same as Merge behavior)
             if (!File.Exists(destFile))
@@ -471,5 +527,20 @@ public static class MetadataFolderBuilder
                 File.Copy(file, destFile);
             }
         }
+    }
+
+    /// <summary>Reads the entity id from a DataContract-serialized workflow Entity xml, or null if unparseable.</summary>
+    private static Guid? TryGetWorkflowEntityId(string file)
+    {
+        try
+        {
+            var idValue = XDocument.Load(file).Root?.Element(ContractsNs + "Id")?.Value;
+            if (Guid.TryParse(idValue, out var id)) return id;
+        }
+        catch
+        {
+            // Unparseable — fall back to filename-based copy (no dedup).
+        }
+        return null;
     }
 }

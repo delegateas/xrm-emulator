@@ -47,14 +47,34 @@ public static class SecurityRoleWriter
 
             foreach (var priv in entityGroup)
             {
-                var privilegeId = ResolvePrivilege(service, priv.Access, entityLogicalName, log);
-                var privilegeName = MapAccessToPrivilegeName(priv.Access, entityLogicalName);
+                Guid? privilegeId;
+                string privilegeName;
 
-                if (privilegeId == null)
+                if (!string.IsNullOrWhiteSpace(priv.Privilege))
                 {
-                    throw new InvalidOperationException(
-                        $"Privilege '{privilegeName}' not found in Dataverse. " +
-                        "Check the entity name and access type — no changes have been applied to the role.");
+                    // Task-based / miscellaneous privilege referenced by raw name
+                    // (e.g. prvSearchAvailability) — no entity/access mapping applies.
+                    privilegeName = priv.Privilege;
+                    privilegeId = FindPrivilegeByName(service, privilegeName);
+
+                    if (privilegeId == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Privilege '{privilegeName}' not found in Dataverse. " +
+                            "Check the privilege name — no changes have been applied to the role.");
+                    }
+                }
+                else
+                {
+                    privilegeId = ResolvePrivilege(service, priv.Access, entityLogicalName, log);
+                    privilegeName = MapAccessToPrivilegeName(priv.Access, entityLogicalName);
+
+                    if (privilegeId == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Privilege '{privilegeName}' not found in Dataverse. " +
+                            "Check the entity name and access type — no changes have been applied to the role.");
+                    }
                 }
 
                 var depth = ParseDepth(priv.Depth);
@@ -65,7 +85,10 @@ public static class SecurityRoleWriter
                 });
                 privilegeNames[privilegeId.Value] = privilegeName;
 
-                log?.Invoke($"  {priv.Access} on {entityLogicalName} ({depth}) → privilege {privilegeId.Value}");
+                var what = string.IsNullOrWhiteSpace(priv.Privilege)
+                    ? $"{priv.Access} on {entityLogicalName}"
+                    : privilegeName;
+                log?.Invoke($"  {what} ({depth}) → privilege {privilegeId.Value}");
             }
         }
 
