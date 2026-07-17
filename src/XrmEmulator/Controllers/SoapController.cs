@@ -68,8 +68,7 @@ public sealed class SoapController : ControllerBase
             {
                 _logger.LogFailedToDeserializeSoapRequest(ex);
                 var faultResponse = CreateSoapFaultResponse($"Invalid request format: {ex.Message}");
-                Response.ContentType = "text/xml; charset=utf-8";
-                return BadRequest(faultResponse);
+                return new ContentResult { Content = faultResponse, ContentType = "text/xml; charset=utf-8", StatusCode = 400 };
             }
 
             // Execute the request using the organization service adapter
@@ -89,8 +88,7 @@ public sealed class SoapController : ControllerBase
             {
                 _logger.LogFailedToExecuteRequest(ex, request.RequestName);
                 var faultResponse = CreateSoapFaultResponse($"Request execution failed: {ex.Message}");
-                Response.ContentType = "text/xml; charset=utf-8";
-                return StatusCode(500, faultResponse);
+                return new ContentResult { Content = faultResponse, ContentType = "text/xml; charset=utf-8", StatusCode = 500 };
             }
 
             // Serialize the response back to SOAP XML
@@ -105,16 +103,14 @@ public sealed class SoapController : ControllerBase
             {
                 _logger.LogFailedToSerializeResponse(ex, request.RequestName);
                 var faultResponse = CreateSoapFaultResponse($"Response serialization failed: {ex.Message}");
-                Response.ContentType = "text/xml; charset=utf-8";
-                return StatusCode(500, faultResponse);
+                return new ContentResult { Content = faultResponse, ContentType = "text/xml; charset=utf-8", StatusCode = 500 };
             }
         }
         catch (Exception ex)
         {
             _logger.LogUnexpectedErrorProcessingSoapRequest(ex);
             var faultResponse = CreateSoapFaultResponse($"Internal server error: {ex.Message}");
-            Response.ContentType = "text/xml; charset=utf-8";
-            return StatusCode(500, faultResponse);
+            return new ContentResult { Content = faultResponse, ContentType = "text/xml; charset=utf-8", StatusCode = 500 };
         }
     }
 

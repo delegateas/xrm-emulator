@@ -46,7 +46,9 @@ public enum CommitItemType
     SecurityRolePrivilegeRemove,
     PluginManagedIdentity,
     PluginContentUpdate,
-    RemoveSolutionComponent
+    RemoveSolutionComponent,
+    PluginStepStateChange,
+    OrgDbOrgSetting
 }
 
 public record CommitItem(CommitItemType Type, string DisplayName, string FilePath, object ParsedData);

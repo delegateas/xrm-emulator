@@ -62,7 +62,8 @@ public static class AssociationsImportWriter
             }
             catch (Exception ex) when (ex.Message.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase)
                                     || ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase)
-                                    || ex.Message.Contains("duplicate", StringComparison.OrdinalIgnoreCase))
+                                    || ex.Message.Contains("duplicate", StringComparison.OrdinalIgnoreCase)
+                                    || ex.Message.Contains("N:N relation cannot be made", StringComparison.OrdinalIgnoreCase))
             {
                 skippedAlreadyAssociated++;
             }

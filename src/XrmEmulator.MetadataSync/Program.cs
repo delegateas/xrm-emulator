@@ -247,6 +247,10 @@ try
     {
         HandleDeleteCommand(positionalArgs, args);
     }
+    else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("orgsetting", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandleOrgSettingCommand(positionalArgs, args, configuration, noCache);
+    }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pending", StringComparison.OrdinalIgnoreCase))
     {
         HandlePendingCommand();
@@ -254,6 +258,10 @@ try
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("commit", StringComparison.OrdinalIgnoreCase))
     {
         await HandleCommitCommand(configuration, noCache, debug);
+    }
+    else if (positionalArgs.Length >= 1 && positionalArgs[0].Equals("init-connection", StringComparison.OrdinalIgnoreCase))
+    {
+        HandleInitConnectionCommand(args);
     }
     else if (positionalArgs.Length >= 1 && positionalArgs[0].Equals("git-init", StringComparison.OrdinalIgnoreCase))
     {
@@ -2158,6 +2166,10 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]environment-variable add[/] <schema-name> --display-name \"<n>\" [[--type String|Number|Boolean|JSON|Secret]] [[--default-value \"<v>\"]]  Stage a new environment variable");
     AnsiConsole.MarkupLine("  [bold]delete[/] <entity> <guid> [[--cascade]]                Delete a record (--cascade removes restrict-delete children first)");
     AnsiConsole.MarkupLine("  [bold]user access[/] <id|email|name> [[--json]]             List a user's direct roles, team memberships, and team-granted roles");
+    AnsiConsole.MarkupLine("  [bold]orgsetting list[/] [[--json]]                          List every setting in orgdborgsettings (live, entire environment)");
+    AnsiConsole.MarkupLine("  [bold]orgsetting get[/] <name> [[--json]]                    Show one orgdborgsettings value (live)");
+    AnsiConsole.MarkupLine("  [bold]orgsetting set[/] <name> <value>                     Stage an orgdborgsettings change (entire environment)");
+    AnsiConsole.MarkupLine("  [bold]orgsetting rollback[/] <_committed/... file>         Stage a restore of a prior orgdborgsettings backup");
     AnsiConsole.MarkupLine("  [bold]sla clone-item[/] <guid> --name <n> --failure <m> --warning <m>  Clone an SLA item with new thresholds");
     AnsiConsole.MarkupLine("  [bold]sla create-kpi[/] --name <n> --entity <e> --kpi-field <f>  Create an SLA KPI definition");
     AnsiConsole.MarkupLine("  [bold]sla add-to-solution[/] <sla-id>                       Add an SLA to the solution");
@@ -2166,9 +2178,11 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]solution remove-component[/] --type <t> --id <guid>  Remove a component from the solution (does NOT delete it)");
     AnsiConsole.MarkupLine("  [bold]plugin register|update|remove|sign[/] ...             Plug-in lifecycle (last is Authenticode sign)");
     AnsiConsole.MarkupLine("  [bold]plugin attach-mi[/] <asm> --client-id <id> --tenant <id>  Bind plug-in assembly to a UAMI for KV access");
+    AnsiConsole.MarkupLine("  [bold]plugin step enable|disable[/] <step-id>               Toggle a plugin step on/off (e.g. temporarily lift a guard)");
     AnsiConsole.MarkupLine("  [bold]cert generate[/] [[--name <cn>]] [[--out <pfx>]] [[--password <p>]] [[--years <n>]]  Generate a self-signed code-signing cert");
     AnsiConsole.MarkupLine("  [bold]cert show-fic[/] [[--pfx <path>]] [[--password <p>]]    Print Power Platform federated identity credential values");
     AnsiConsole.MarkupLine("  [bold]commit[/]                                             Push pending changes to CRM");
+    AnsiConsole.MarkupLine("  [bold]init-connection[/] --environment-url <url> [[--client-id <id>]]  Write connection_metadata.json without a full sync (use before solution import)");
     AnsiConsole.MarkupLine("  [bold]git-init[/]                                           Initialize git tracking in SolutionExport/");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Options:[/]");
@@ -2914,7 +2928,7 @@ static void HandleEntityNewCommand(string[] positionalArgs, string[] allArgs)
         PrimaryAttributeSchemaName = $"{schemaName.Split('_')[0]}_Name",
         PrimaryAttributeDisplayName = "Navn",
         Description = description,
-        SolutionUniqueName = metadata.Solution.UniqueName,
+        SolutionUniqueName = (metadata.Solution ?? throw new InvalidOperationException("This command requires a solution — run a full sync first (metadatasync with no command).")).UniqueName,
         Attributes = [],
     };
 
@@ -2983,7 +2997,7 @@ static void HandleEntityEnableChangeTrackingCommand(string[] positionalArgs, str
         var definition = new EnableChangeTrackingDefinition
         {
             EntityLogicalName = logicalName,
-            SolutionUniqueName = metadata.Solution.UniqueName,
+            SolutionUniqueName = (metadata.Solution ?? throw new InvalidOperationException("This command requires a solution — run a full sync first (metadatasync with no command).")).UniqueName,
         };
 
         var destPath = Path.Combine(pendingDir, $"{logicalName}.enablechangetracking.json");
@@ -3194,7 +3208,7 @@ static void HandleEntityStatusValueAddCommand(string[] positionalArgs, string[] 
     var definition = new StatusValueDefinition
     {
         EntityLogicalName = entityLogicalName,
-        SolutionUniqueName = metadata.Solution.UniqueName,
+        SolutionUniqueName = (metadata.Solution ?? throw new InvalidOperationException("This command requires a solution — run a full sync first (metadatasync with no command).")).UniqueName,
         AddStatusCodes = addList,
         RenameStatusCodes = existing?.RenameStatusCodes,
     };
@@ -3211,7 +3225,7 @@ static void HandleEntityStatusValueAddCommand(string[] positionalArgs, string[] 
     AnsiConsole.MarkupLine($"  Label:    {label}");
     AnsiConsole.MarkupLine($"  State:    {stateCode}");
     AnsiConsole.MarkupLine($"  Value:    {(value.HasValue ? value.Value.ToString() : "(auto-assign)")}");
-    AnsiConsole.MarkupLine($"  Solution: {metadata.Solution.UniqueName}");
+    AnsiConsole.MarkupLine($"  Solution: {metadata.Solution?.UniqueName}");
     AnsiConsole.MarkupLine($"  File:     {destPath}");
     AnsiConsole.MarkupLine($"  Total:    {addList.Count} status value(s) pending");
     AnsiConsole.WriteLine();
@@ -3758,10 +3772,25 @@ static void HandleSolutionAddComponentCommand(string[] positionalArgs, string[] 
         fileName = $"appmodule_{name}.solutioncomponent.json";
         displayLine = $"  App module: {name}";
     }
+    else if (componentType == "customcontrol")
+    {
+        var name = ParseNamedArg(allArgs, "--name");
+        if (string.IsNullOrEmpty(name)) { PrintSolutionAddComponentUsage(); Environment.Exit(1); return; }
+        definition = new XrmEmulator.MetadataSync.Models.SolutionComponentDefinition
+        {
+            EntityLogicalName = name!,
+            AttributeLogicalName = "",
+            ComponentType = componentType,
+            DisplayName = name,
+            SolutionUniqueName = solutionUniqueName
+        };
+        fileName = $"customcontrol_{name}.solutioncomponent.json";
+        displayLine = $"  Custom control (PCF): {name}";
+    }
     else
     {
         AnsiConsole.MarkupLine($"[red]Unsupported solution component type: {componentType}.[/]");
-        AnsiConsole.MarkupLine("Supported: attribute, form, entity, relationship, view, optionset, webresource, securityrole, customapi, appaction, environmentvariable, appmodule");
+        AnsiConsole.MarkupLine("Supported: attribute, form, entity, relationship, view, optionset, webresource, securityrole, customapi, appaction, environmentvariable, appmodule, customcontrol");
         Environment.Exit(1);
         return;
     }
@@ -3996,6 +4025,7 @@ static void PrintSolutionAddComponentUsage()
     AnsiConsole.MarkupLine("  solution add-component --type appaction         --name <unique-name>");
     AnsiConsole.MarkupLine("  solution add-component --type environmentvariable --name <schema-name>");
     AnsiConsole.MarkupLine("  solution add-component --type appmodule         --name <unique-name>");
+    AnsiConsole.MarkupLine("  solution add-component --type customcontrol     --name <full-control-name, e.g. kf_KF.Partner.SelectOptionsEditor>");
     AnsiConsole.MarkupLine("");
     AnsiConsole.MarkupLine("[grey]Adds an existing component (created in another solution) to this solution.[/]");
     AnsiConsole.MarkupLine("[grey]Examples:[/]");
@@ -4594,6 +4624,277 @@ static string DecodeTeamType(int? value) => value switch
     null => "",
     _ => $"Unknown({value})"
 };
+
+// ──────────────────────────────────────────────────────────────
+// orgsetting list|get|set|rollback — orgdborgsettings (org-wide XML blob)
+// ──────────────────────────────────────────────────────────────
+static async Task HandleOrgSettingCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 2 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        PrintOrgSettingUsage();
+        Environment.Exit(positionalArgs.Length < 2 ? 1 : 0);
+    }
+
+    switch (positionalArgs[1].ToLowerInvariant())
+    {
+        case "list":
+            await HandleOrgSettingListCommand(allArgs, configuration, noCache);
+            return;
+        case "get":
+            await HandleOrgSettingGetCommand(positionalArgs, allArgs, configuration, noCache);
+            return;
+        case "set":
+            await HandleOrgSettingSetCommand(positionalArgs, allArgs, configuration, noCache);
+            return;
+        case "rollback":
+            await HandleOrgSettingRollbackCommand(positionalArgs, allArgs, configuration, noCache);
+            return;
+    }
+
+    AnsiConsole.MarkupLine($"[red]Unknown orgsetting subcommand:[/] {positionalArgs[1]}");
+    PrintOrgSettingUsage();
+    Environment.Exit(1);
+}
+
+static void PrintOrgSettingUsage()
+{
+    AnsiConsole.MarkupLine("[bold]MetadataSync orgsetting[/] — read/stage changes to the org-wide orgdborgsettings XML blob");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Commands:[/]");
+    AnsiConsole.MarkupLine("  orgsetting list [[--json]]                    List every setting currently in orgdborgsettings (live)");
+    AnsiConsole.MarkupLine("  orgsetting get <name> [[--json]]               Show one setting's current value (live)");
+    AnsiConsole.MarkupLine("  orgsetting set <name> <value>                Stage a change — affects the ENTIRE environment");
+    AnsiConsole.MarkupLine("  orgsetting rollback <_committed/... file>    Stage a restore of a prior orgdborgsettings backup");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Notes:[/]");
+    AnsiConsole.MarkupLine("  orgdborgsettings is undocumented and has no supported UI or pac CLI editor. There is no");
+    AnsiConsole.MarkupLine("  per-setting validation — a typo'd name is silently ignored by Dataverse. 'set' and 'rollback'");
+    AnsiConsole.MarkupLine("  only stage a pending change; run 'commit' to apply it.");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[yellow]Examples:[/]");
+    AnsiConsole.MarkupLine("  [grey]orgsetting get AllowDisabledUsersAddedToOwnerTeams[/]");
+    AnsiConsole.MarkupLine("  [grey]orgsetting set AllowDisabledUsersAddedToOwnerTeams true[/]");
+    AnsiConsole.MarkupLine("  [grey]orgsetting rollback SolutionExport/_committed/OrgDbOrgSettings/allowdisabledusersaddedtoownerteams.orgdborgsetting.json[/]");
+}
+
+static async Task<(IOrganizationService client, ConnectionMetadata metadata, string baseDir)> ConnectForOrgSetting(IConfiguration configuration, bool noCache, bool quiet)
+{
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+
+    if (!quiet) AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    if (!quiet) AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    return (client, metadata, baseDir);
+}
+
+static async Task HandleOrgSettingListCommand(string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    var asJson = HasFlag(allArgs, "--json");
+    var (client, _, _) = await ConnectForOrgSetting(configuration, noCache, asJson);
+
+    var (_, xml) = OrgDbOrgSettingsReader.RetrieveLive(client);
+    var settings = OrgDbOrgSettingsWriter.ParseAll(xml).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
+    if (asJson)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            settings.Select(s => new { name = s.Name, value = s.Value }),
+            new JsonSerializerOptions { WriteIndented = true }));
+        return;
+    }
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[bold]orgdborgsettings ({settings.Count} setting(s))[/]");
+    if (settings.Count == 0)
+    {
+        AnsiConsole.MarkupLine("[grey](blob is empty)[/]");
+        return;
+    }
+    var table = new Table().AddColumn("Name").AddColumn("Value");
+    foreach (var s in settings)
+        table.AddRow(Markup.Escape(s.Name), Markup.Escape(s.Value));
+    AnsiConsole.Write(table);
+}
+
+static async Task HandleOrgSettingGetCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3)
+    {
+        PrintOrgSettingUsage();
+        Environment.Exit(1);
+    }
+    var name = positionalArgs[2];
+    var asJson = HasFlag(allArgs, "--json");
+    var (client, _, _) = await ConnectForOrgSetting(configuration, noCache, asJson);
+
+    var (_, xml) = OrgDbOrgSettingsReader.RetrieveLive(client);
+    var value = OrgDbOrgSettingsWriter.GetSettingValue(xml, name);
+
+    if (asJson)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { name, value },
+            new JsonSerializerOptions { WriteIndented = true }));
+        return;
+    }
+
+    AnsiConsole.MarkupLine(value != null
+        ? $"[bold]{Markup.Escape(name)}[/] = {Markup.Escape(value)}"
+        : $"[bold]{Markup.Escape(name)}[/] [grey](not set)[/]");
+}
+
+static async Task HandleOrgSettingSetCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 4 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        PrintOrgSettingUsage();
+        Environment.Exit(positionalArgs.Length < 4 ? 1 : 0);
+    }
+
+    var settingName = positionalArgs[2];
+    var newValue = positionalArgs[3];
+
+    var (client, metadata, baseDir) = await ConnectForOrgSetting(configuration, noCache, quiet: false);
+
+    var (orgId, liveXml) = OrgDbOrgSettingsReader.RetrieveLive(client);
+    var currentValue = OrgDbOrgSettingsWriter.GetSettingValue(liveXml, settingName);
+    var environmentUrl = metadata.Environment?.Url ?? "(unknown environment)";
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[red bold]⚠ ENTIRE ENVIRONMENT CHANGE[/]");
+    AnsiConsole.MarkupLine($"This modifies orgdborgsettings on [bold]{Markup.Escape(environmentUrl)}[/] for every user, not just this solution.");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"  Setting:       [bold]{Markup.Escape(settingName)}[/]");
+    AnsiConsole.MarkupLine($"  Current value: {Markup.Escape(currentValue ?? "(not set)")}");
+    AnsiConsole.MarkupLine($"  New value:     {Markup.Escape(newValue)}");
+    AnsiConsole.WriteLine();
+
+    if (!AnsiConsole.Confirm("Stage this change? (nothing is written to CRM until you also run 'commit')", defaultValue: false))
+    {
+        AnsiConsole.MarkupLine("[yellow]Cancelled — nothing staged.[/]");
+        return;
+    }
+
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "OrgDbOrgSettings");
+    Directory.CreateDirectory(pendingDir);
+
+    var def = new OrgDbOrgSettingDefinition
+    {
+        Mode = OrgDbOrgSettingMode.SetValue,
+        OrganizationId = orgId,
+        EnvironmentUrl = environmentUrl,
+        BaselineXml = liveXml ?? "",
+        StagedAt = DateTimeOffset.UtcNow,
+        SettingName = settingName,
+        NewValue = newValue,
+        PreviousValueForDisplay = currentValue
+    };
+
+    var fileName = $"{settingName.ToLowerInvariant()}.orgdborgsetting.json";
+    var filePath = Path.Combine(pendingDir, fileName);
+    File.WriteAllText(filePath, JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged:[/] {Markup.Escape(settingName)} = {Markup.Escape(newValue)}");
+    AnsiConsole.MarkupLine($"[grey]File: {filePath}[/]");
+    AnsiConsole.MarkupLine("[grey]Run 'commit' to apply against CRM (backup + verification happen automatically).[/]");
+}
+
+static async Task HandleOrgSettingRollbackCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
+{
+    if (positionalArgs.Length < 3 || HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        PrintOrgSettingUsage();
+        Environment.Exit(positionalArgs.Length < 3 ? 1 : 0);
+    }
+
+    var sourcePath = positionalArgs[2];
+    var normalizedSource = sourcePath.Replace('\\', '/');
+    if (!normalizedSource.Contains("_committed/OrgDbOrgSettings/", StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine("[red]Rollback source must be an archived file under _committed/OrgDbOrgSettings/.[/]");
+        if (normalizedSource.Contains("_pending/", StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine("[yellow]That file is still pending — nothing was written to CRM yet, just delete the pending file instead.[/]");
+        }
+        Environment.Exit(1);
+    }
+    if (!File.Exists(sourcePath))
+    {
+        AnsiConsole.MarkupLine($"[red]File not found:[/] {sourcePath}");
+        Environment.Exit(1);
+    }
+
+    var archived = JsonSerializer.Deserialize<OrgDbOrgSettingDefinition>(File.ReadAllText(sourcePath),
+        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+
+    var (client, metadata, baseDir) = await ConnectForOrgSetting(configuration, noCache, quiet: false);
+    var (orgId, liveXml) = OrgDbOrgSettingsReader.RetrieveLive(client);
+    var environmentUrl = metadata.Environment?.Url ?? "(unknown environment)";
+
+    var currentSettings = OrgDbOrgSettingsWriter.ParseAll(liveXml).ToDictionary(s => s.Name, s => s.Value, StringComparer.OrdinalIgnoreCase);
+    var restoredSettings = OrgDbOrgSettingsWriter.ParseAll(archived.BaselineXml).ToDictionary(s => s.Name, s => s.Value, StringComparer.OrdinalIgnoreCase);
+    var changedNames = currentSettings.Keys.Union(restoredSettings.Keys, StringComparer.OrdinalIgnoreCase)
+        .Where(n => currentSettings.GetValueOrDefault(n) != restoredSettings.GetValueOrDefault(n))
+        .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[red bold]⚠ ENTIRE ENVIRONMENT CHANGE (rollback)[/]");
+    AnsiConsole.MarkupLine($"This restores orgdborgsettings on [bold]{Markup.Escape(environmentUrl)}[/] to the blob backed up in:");
+    AnsiConsole.MarkupLine($"  {sourcePath}");
+    AnsiConsole.WriteLine();
+    if (changedNames.Count == 0)
+    {
+        AnsiConsole.MarkupLine("[grey]No differences from the current live blob — this would be a no-op.[/]");
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[bold]Settings that would change:[/]");
+        foreach (var n in changedNames)
+            AnsiConsole.MarkupLine($"  {Markup.Escape(n)}: \"{Markup.Escape(currentSettings.GetValueOrDefault(n) ?? "(not set)")}\" -> \"{Markup.Escape(restoredSettings.GetValueOrDefault(n) ?? "(not set)")}\"");
+    }
+    AnsiConsole.WriteLine();
+
+    if (!AnsiConsole.Confirm("Stage this rollback? (nothing is written to CRM until you also run 'commit')", defaultValue: false))
+    {
+        AnsiConsole.MarkupLine("[yellow]Cancelled — nothing staged.[/]");
+        return;
+    }
+
+    var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending", "OrgDbOrgSettings");
+    Directory.CreateDirectory(pendingDir);
+
+    var def = new OrgDbOrgSettingDefinition
+    {
+        Mode = OrgDbOrgSettingMode.RestoreBlob,
+        OrganizationId = orgId,
+        EnvironmentUrl = environmentUrl,
+        BaselineXml = liveXml ?? "",
+        StagedAt = DateTimeOffset.UtcNow,
+        RestoreXml = archived.BaselineXml,
+        RollbackSourceFile = sourcePath
+    };
+
+    var fileName = $"rollback_{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.orgdborgsetting.json";
+    var filePath = Path.Combine(pendingDir, fileName);
+    File.WriteAllText(filePath, JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    }));
+
+    AnsiConsole.MarkupLine($"[green]Staged rollback from:[/] {sourcePath}");
+    AnsiConsole.MarkupLine($"[grey]File: {filePath}[/]");
+    AnsiConsole.MarkupLine("[grey]Run 'commit' to apply against CRM (verification happens automatically).[/]");
+}
 
 // ──────────────────────────────────────────────────────────────
 // security-role update|add — manage security role privileges
@@ -5909,6 +6210,12 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
         return;
     }
 
+    if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("step", StringComparison.OrdinalIgnoreCase))
+    {
+        HandlePluginStepStateCommand(positionalArgs, allArgs).GetAwaiter().GetResult();
+        return;
+    }
+
     if (positionalArgs.Length >= 2 && positionalArgs[1].Equals("sign", StringComparison.OrdinalIgnoreCase))
     {
         HandlePluginSignCommand(positionalArgs, allArgs);
@@ -5931,6 +6238,7 @@ static void HandlePluginCommand(string[] positionalArgs, string[] allArgs)
         AnsiConsole.MarkupLine("  plugin remove <assembly-name>  Remove a plugin assembly and its steps from CRM");
         AnsiConsole.MarkupLine("  plugin sign <dll-path>         Authenticode-sign a plugin DLL with the env's signing cert");
         AnsiConsole.MarkupLine("  plugin push-content <name> <dll-path> [[--version v]]  Patch only pluginassembly.content + version (no solution/type/step changes)");
+        AnsiConsole.MarkupLine("  plugin step enable|disable <step-id>  Toggle an sdkmessageprocessingstep on/off (e.g. to temporarily lift a guard)");
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[grey]Example: plugin register src/MyPlugin/bin/Release/net462/MyPlugin.dll[/]");
         Environment.Exit(1);
@@ -6226,6 +6534,83 @@ static async Task HandlePluginRemoveCommand(string[] positionalArgs, string[] al
 
     if (assemblyId == Guid.Empty)
         AnsiConsole.MarkupLine("[red]WARNING: Could not find assembly in solution export. You may need to set the ComponentId manually.[/]");
+}
+
+static async Task HandlePluginStepStateCommand(string[] positionalArgs, string[] allArgs)
+{
+    if (positionalArgs.Length < 3
+        || (!positionalArgs[2].Equals("enable", StringComparison.OrdinalIgnoreCase)
+            && !positionalArgs[2].Equals("disable", StringComparison.OrdinalIgnoreCase)))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin step enable|disable <step-id>");
+        AnsiConsole.MarkupLine("[grey]Example: plugin step disable abe3abca-4671-f111-ab0e-7ced8d73cb4f[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    var enable = positionalArgs[2].Equals("enable", StringComparison.OrdinalIgnoreCase);
+
+    if (positionalArgs.Length < 4 || !Guid.TryParse(positionalArgs[3], out var stepId))
+    {
+        AnsiConsole.MarkupLine("[red]Usage:[/] plugin step enable|disable <step-id>");
+        AnsiConsole.MarkupLine("[red]<step-id> must be a valid GUID (the sdkmessageprocessingstep id).[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    var metadataPath = FindConnectionMetadata();
+    var baseDir = GetBaseDir(metadataPath);
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+
+    string? stepName = null;
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration: null!, noCache: false);
+    using (var client = await ConnectionFactory.CreateAsync(connectionSettings))
+    {
+        Entity step;
+        try
+        {
+            step = client.Retrieve("sdkmessageprocessingstep", stepId, new Microsoft.Xrm.Sdk.Query.ColumnSet("name", "statecode"));
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[red]Could not find sdkmessageprocessingstep {stepId} in CRM:[/] {ex.Message}");
+            Environment.Exit(1);
+            return;
+        }
+
+        stepName = step.GetAttributeValue<string>("name");
+        var currentState = step.GetAttributeValue<Microsoft.Xrm.Sdk.OptionSetValue>("statecode")?.Value ?? 0;
+        var currentlyEnabled = currentState == 0;
+
+        AnsiConsole.MarkupLine($"[grey]Found step:[/] {stepName} ({stepId}) — currently {(currentlyEnabled ? "[green]enabled[/]" : "[yellow]disabled[/]")}");
+
+        if (currentlyEnabled == enable)
+        {
+            AnsiConsole.MarkupLine($"[yellow]Step is already {(enable ? "enabled" : "disabled")} — staging anyway (no-op on commit if unchanged).[/]");
+        }
+    }
+
+    var pendingDir = Path.Combine(solutionExportDir, "_pending", "PluginStepStates");
+    Directory.CreateDirectory(pendingDir);
+    var destPath = Path.Combine(pendingDir, $"{stepId:D}.pluginstepstate.json");
+
+    var def = new PluginStepStateDefinition
+    {
+        StepId = stepId,
+        StepName = stepName,
+        Enable = enable
+    };
+    var json = JsonSerializer.Serialize(def, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    });
+    File.WriteAllText(destPath, json);
+
+    AnsiConsole.MarkupLine($"[green]Staged {(enable ? "enable" : "disable")}:[/] {stepName ?? stepId.ToString()}");
+    AnsiConsole.MarkupLine($"[grey]{Path.GetRelativePath(baseDir, destPath)}[/]");
+    AnsiConsole.MarkupLine("[grey]Run [/][blue]commit[/][grey] to apply.[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -7900,7 +8285,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         debugLog.WriteLine($"  baseDir: {baseDir}");
         debugLog.WriteLine($"  pendingDir: {pendingDir}");
         debugLog.WriteLine($"  environment: {metadata.Environment.Url}");
-        debugLog.WriteLine($"  solution: {metadata.Solution.UniqueName}");
+        debugLog.WriteLine($"  solution: {metadata.Solution?.UniqueName ?? "(none)"}");
         AnsiConsole.MarkupLine($"[grey]Debug log: {logPath}[/]");
     }
     void Log(string message) { debugLog?.WriteLine($"[{DateTime.UtcNow:O}] {message}"); }
@@ -8252,7 +8637,7 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
         var existingMetadata = ReadConnectionMetadata(existingMetadataPath);
         var existingBaseDir = GetBaseDir(existingMetadataPath);
 
-        AnsiConsole.MarkupLine($"[blue]Existing sync detected:[/] {existingMetadata.Solution.UniqueName} @ {existingMetadata.Environment.Url}");
+        AnsiConsole.MarkupLine($"[blue]Existing sync detected:[/] {existingMetadata.Solution?.UniqueName ?? "(no solution)"} @ {existingMetadata.Environment.Url}");
         AnsiConsole.MarkupLine($"[grey]Last synced: {existingMetadata.SyncedAt:u}[/]");
         AnsiConsole.MarkupLine($"[grey]Output: {existingBaseDir}[/]");
         AnsiConsole.WriteLine();
@@ -8271,7 +8656,7 @@ static async Task HandleSyncCommand(IConfiguration configuration, bool noCache)
             Environment.Exit(1);
         }
 
-        if (AnsiConsole.Confirm($"Re-export [green]{existingMetadata.Solution.UniqueName}[/]?"))
+        if (AnsiConsole.Confirm($"Re-export [green]{existingMetadata.Solution?.UniqueName ?? "(unknown)"}[/]?"))
         {
             var connectionSettings = await ReconnectFromMetadata(existingMetadata, configuration, noCache);
             using var client = await ConnectionFactory.CreateAsync(connectionSettings);
@@ -8726,6 +9111,19 @@ static string FormatCommitItemDetails(CommitItem item)
         return $"{Markup.Escape(item.DisplayName)}\n  [grey]• Type: {Markup.Escape(attrDef.AttributeType)}, Entity: {Markup.Escape(attrDef.EntityLogicalName)}[/]";
     }
 
+    if (item.Type == CommitItemType.OrgDbOrgSetting && item.ParsedData is OrgDbOrgSettingDefinition orgDef)
+    {
+        var summary = orgDef.Mode == OrgDbOrgSettingMode.SetValue
+            ? $"  [grey]• {Markup.Escape(orgDef.SettingName!)}: \"{Markup.Escape(orgDef.PreviousValueForDisplay ?? "(not set)")}\" -> \"{Markup.Escape(orgDef.NewValue!)}\"[/]"
+            : $"  [grey]• Restore backup from {Markup.Escape(orgDef.RollbackSourceFile ?? "(unknown)")}[/]";
+        return string.Join("\n", new[]
+        {
+            Markup.Escape(item.DisplayName),
+            summary,
+            $"  [red]⚠ Affects ENTIRE environment: {Markup.Escape(orgDef.EnvironmentUrl)}[/]"
+        });
+    }
+
     return Markup.Escape(item.DisplayName);
 }
 
@@ -8735,6 +9133,58 @@ static string GetBaseDir(string metadataPath)
     return Path.GetFileName(parent) == ".metadatasync"
         ? Path.GetDirectoryName(parent)!
         : parent;
+}
+
+// ──────────────────────────────────────────────────────────────
+// init-connection — write connection_metadata.json without a full sync
+// ──────────────────────────────────────────────────────────────
+// Use this when the target environment exists but the solution hasn't been
+// imported yet (e.g. to run `plugin attach-mi` + `commit` before import).
+// The solution field is left null; it is populated on the first full sync.
+static void HandleInitConnectionCommand(string[] allArgs)
+{
+    var environmentUrl = ParseNamedArg(allArgs, "--environment-url");
+    if (string.IsNullOrWhiteSpace(environmentUrl))
+    {
+        AnsiConsole.MarkupLine("[red]--environment-url is required[/]");
+        AnsiConsole.MarkupLine("  Example: metadatasync init-connection --environment-url https://kf-preuat.crm4.dynamics.com");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Normalise: ensure https:// prefix
+    if (!environmentUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        environmentUrl = "https://" + environmentUrl;
+
+    var clientId = ParseNamedArg(allArgs, "--client-id") ?? "51f81489-12ee-4a9e-aaae-a2591f45987d";
+
+    var outputDirectory = Directory.GetCurrentDirectory();
+    var stateDir = Path.Combine(outputDirectory, ".metadatasync");
+    Directory.CreateDirectory(stateDir);
+    var path = Path.Combine(stateDir, "connection_metadata.json");
+
+    var metadata = new ConnectionMetadata
+    {
+        Environment = new EnvironmentMetadata { Url = environmentUrl },
+        Solution = null,
+        AuthMode = "InteractiveBrowser",
+        ClientId = clientId,
+        SyncedAt = DateTimeOffset.UtcNow,
+    };
+
+    var json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    });
+    File.WriteAllText(path, json);
+
+    AnsiConsole.MarkupLine($"[green]Connection initialised:[/] {path}");
+    AnsiConsole.MarkupLine($"  Environment: {environmentUrl}");
+    AnsiConsole.MarkupLine($"  Client ID:   {clientId}");
+    AnsiConsole.MarkupLine($"  Solution:    [grey](none — run a full sync after solution import to populate)[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[grey]You can now run [bold]plugin attach-mi[/] and [bold]commit[/].[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -8970,7 +9420,7 @@ static async Task HandleMcpInit()
 
     Console.WriteLine("MetadataSync MCP Init");
     Console.WriteLine($"  Environment: {metadata.Environment.Url}");
-    Console.WriteLine($"  Solution: {metadata.Solution.UniqueName}");
+    Console.WriteLine($"  Solution: {metadata.Solution?.UniqueName ?? "(none)"}");
     Console.WriteLine();
 
     // Prompt for Graph app registration details

@@ -28,10 +28,20 @@ public class SolutionMetadataService
     public IReadOnlyList<CrmView> GetViewsForEntity(string entityName) =>
         _metadata.Value.ViewsByEntity.TryGetValue(entityName, out var views) ? views : [];
 
-    public IReadOnlyList<CrmView> GetViewsForApp(CrmApp app, string entityName) =>
-        GetViewsForEntity(entityName)
-            .Where(v => app.ViewIds.Count == 0 || app.ViewIds.Contains(v.Id))
-            .ToList();
+    public IReadOnlyList<CrmView> GetViewsForApp(CrmApp app, string entityName)
+    {
+        // AppModuleComponent (type=26) view ids are a single flat list across every entity in
+        // the app — they only represent entities where the app designer explicitly restricted
+        // which views show. An entity added without restricting its views (e.g. kf_brand) has
+        // none of its own view ids in that list; it should fall back to all its views rather
+        // than being filtered down to zero just because other entities' views are listed.
+        var allViewsForEntity = GetViewsForEntity(entityName);
+        if (app.ViewIds.Count == 0)
+            return allViewsForEntity;
+
+        var restricted = allViewsForEntity.Where(v => app.ViewIds.Contains(v.Id)).ToList();
+        return restricted.Count > 0 ? restricted : allViewsForEntity;
+    }
 
     public CrmView? GetView(Guid viewId) =>
         _metadata.Value.ViewsById.GetValueOrDefault(viewId);
@@ -61,6 +71,11 @@ public class SolutionMetadataService
             return actions.Where(a => a.AppModuleUniqueName == null || string.Equals(a.AppModuleUniqueName, appUniqueName, StringComparison.OrdinalIgnoreCase)).ToList();
         return actions;
     }
+
+    public IReadOnlyList<CrmCustomApi> CustomApis => _metadata.Value.CustomApis.Values.ToList();
+
+    public CrmCustomApi? GetCustomApi(string uniqueName) =>
+        _metadata.Value.CustomApis.GetValueOrDefault(uniqueName);
 
     private ParsedMetadata Parse()
     {
@@ -155,6 +170,43 @@ public class SolutionMetadataService
                         }
                         actionList.Add(action);
                     }
+                }
+            }
+        }
+
+        // Parse PluginAssemblies (used below to resolve Custom API plugintypeid -> full type name)
+        var pluginTypeNamesById = new Dictionary<Guid, string>();
+        var pluginAssembliesDir = Path.Combine(solDir, "PluginAssemblies");
+        if (Directory.Exists(pluginAssembliesDir))
+        {
+            foreach (var dataFile in Directory.GetFiles(pluginAssembliesDir, "*.dll.data.xml", SearchOption.AllDirectories))
+            {
+                var doc = XDocument.Load(dataFile);
+                foreach (var typeEl in doc.Root?.Element("PluginTypes")?.Elements("PluginType") ?? [])
+                {
+                    if (Guid.TryParse(typeEl.Attribute("PluginTypeId")?.Value, out var typeId))
+                    {
+                        var typeName = typeEl.Attribute("Name")?.Value;
+                        if (!string.IsNullOrEmpty(typeName))
+                            pluginTypeNamesById[typeId] = typeName;
+                    }
+                }
+            }
+        }
+
+        // Parse Custom APIs
+        var solutionName = Path.GetFileName(solDir);
+        var customApisDir = Path.Combine(solDir, "customapis");
+        if (Directory.Exists(customApisDir))
+        {
+            foreach (var apiDir in Directory.GetDirectories(customApisDir))
+            {
+                var apiFile = Path.Combine(apiDir, "customapi.xml");
+                if (File.Exists(apiFile))
+                {
+                    var api = ParseCustomApi(apiFile, apiDir, pluginTypeNamesById, solutionName);
+                    if (api != null)
+                        result.CustomApis[api.UniqueName] = api;
                 }
             }
         }
@@ -418,8 +470,16 @@ public class SolutionMetadataService
         var name = root.Attribute("Name")?.Value;
         if (string.IsNullOrEmpty(name)) return (null, []);
 
+        return (name, ParseOptionsElement(root));
+    }
+
+    // Shared by global option set files (OptionSets/*.xml, root IS the optionset element) and
+    // local/inline option sets (an <optionset> child nested under a picklist/state/status
+    // attribute in Entity.xml) — both use the same <options><option value="..."><labels>... shape.
+    private static Dictionary<int, string> ParseOptionsElement(XElement optionSetElement)
+    {
         var options = new Dictionary<int, string>();
-        foreach (var optEl in root.Element("options")?.Elements("option") ?? [])
+        foreach (var optEl in optionSetElement.Element("options")?.Elements("option") ?? [])
         {
             if (!int.TryParse(optEl.Attribute("value")?.Value, out var value)) continue;
             var label = optEl.Element("labels")
@@ -428,7 +488,7 @@ public class SolutionMetadataService
                 ?.Attribute("description")?.Value ?? value.ToString();
             options[value] = label;
         }
-        return (name, options);
+        return options;
     }
 
     private static CrmEntity? ParseEntity(string filePath, Dictionary<string, Dictionary<int, string>>? globalOptionSets = null)
@@ -465,6 +525,8 @@ public class SolutionMetadataService
                 var osName = attrEl.Element("OptionSetName")?.Value;
                 if (osName != null && globalOptionSets != null && globalOptionSets.TryGetValue(osName, out var osOptions))
                     options = osOptions;
+                else if (attrEl.Element("optionset") is { } inlineOptionSet)
+                    options = ParseOptionsElement(inlineOptionSet);
             }
 
             attributes[attrLogicalName] = new CrmAttribute
@@ -580,6 +642,119 @@ public class SolutionMetadataService
             Hidden = hidden,
             OnClickEventType = onClickEventType,
             JsFunctionName = jsFunctionName
+        };
+    }
+
+    private static CrmCustomApi? ParseCustomApi(string filePath, string apiDir, Dictionary<Guid, string> pluginTypeNamesById, string solutionName)
+    {
+        var doc = XDocument.Load(filePath);
+        var root = doc.Root;
+        if (root == null) return null;
+
+        var uniqueName = root.Attribute("uniquename")?.Value ?? root.Element("name")?.Value;
+        if (string.IsNullOrEmpty(uniqueName)) return null;
+
+        var displayName = root.Element("displayname")
+            ?.Elements("label")
+            .FirstOrDefault(l => (int?)l.Attribute("languagecode") == DefaultLcid)
+            ?.Attribute("description")?.Value
+            ?? root.Element("displayname")?.Attribute("default")?.Value
+            ?? uniqueName;
+
+        var description = root.Element("description")
+            ?.Elements("label")
+            .FirstOrDefault(l => (int?)l.Attribute("languagecode") == DefaultLcid)
+            ?.Attribute("description")?.Value
+            ?? root.Element("description")?.Attribute("default")?.Value;
+
+        var isFunction = root.Element("isfunction")?.Value == "1";
+        var bindingType = int.TryParse(root.Element("bindingtype")?.Value, out var bt) ? bt : 0;
+        var boundEntityLogicalName = root.Element("boundentitylogicalname")?.Value;
+
+        string? pluginTypeName = null;
+        var pluginTypeIdStr = root.Element("plugintypeid")?.Element("plugintypeexportkey")?.Value;
+        if (Guid.TryParse(pluginTypeIdStr, out var pluginTypeId))
+            pluginTypeNamesById.TryGetValue(pluginTypeId, out pluginTypeName);
+
+        var requestParameters = new List<CrmCustomApiParameter>();
+        var requestParamsDir = Path.Combine(apiDir, "customapirequestparameters");
+        if (Directory.Exists(requestParamsDir))
+        {
+            foreach (var paramDir in Directory.GetDirectories(requestParamsDir))
+            {
+                var paramFile = Path.Combine(paramDir, "customapirequestparameter.xml");
+                if (File.Exists(paramFile))
+                {
+                    var param = ParseCustomApiParameter(paramFile, includeIsOptional: true);
+                    if (param != null)
+                        requestParameters.Add(param);
+                }
+            }
+        }
+
+        var responseProperties = new List<CrmCustomApiParameter>();
+        var responsePropsDir = Path.Combine(apiDir, "customapiresponseproperties");
+        if (Directory.Exists(responsePropsDir))
+        {
+            foreach (var propDir in Directory.GetDirectories(responsePropsDir))
+            {
+                var propFile = Path.Combine(propDir, "customapiresponseproperty.xml");
+                if (File.Exists(propFile))
+                {
+                    var prop = ParseCustomApiParameter(propFile, includeIsOptional: false);
+                    if (prop != null)
+                        responseProperties.Add(prop);
+                }
+            }
+        }
+
+        return new CrmCustomApi
+        {
+            UniqueName = uniqueName,
+            DisplayName = displayName,
+            Description = description,
+            IsFunction = isFunction,
+            BindingType = bindingType,
+            BoundEntityLogicalName = boundEntityLogicalName,
+            PluginTypeName = pluginTypeName,
+            SolutionName = solutionName,
+            RequestParameters = requestParameters,
+            ResponseProperties = responseProperties
+        };
+    }
+
+    private static CrmCustomApiParameter? ParseCustomApiParameter(string filePath, bool includeIsOptional)
+    {
+        var doc = XDocument.Load(filePath);
+        var root = doc.Root;
+        if (root == null) return null;
+
+        var uniqueName = root.Attribute("uniquename")?.Value ?? root.Element("name")?.Value;
+        if (string.IsNullOrEmpty(uniqueName)) return null;
+
+        var displayName = root.Element("displayname")
+            ?.Elements("label")
+            .FirstOrDefault(l => (int?)l.Attribute("languagecode") == DefaultLcid)
+            ?.Attribute("description")?.Value
+            ?? root.Element("displayname")?.Attribute("default")?.Value
+            ?? uniqueName;
+
+        var description = root.Element("description")
+            ?.Elements("label")
+            .FirstOrDefault(l => (int?)l.Attribute("languagecode") == DefaultLcid)
+            ?.Attribute("description")?.Value
+            ?? root.Element("description")?.Attribute("default")?.Value;
+
+        var type = int.TryParse(root.Element("type")?.Value, out var t) ? t : CrmCustomApiParameter.TypeString;
+        var isOptional = includeIsOptional && root.Element("isoptional")?.Value == "1";
+
+        return new CrmCustomApiParameter
+        {
+            UniqueName = uniqueName,
+            DisplayName = displayName,
+            Description = description,
+            Type = type,
+            IsOptional = isOptional
         };
     }
 
@@ -762,5 +937,6 @@ public class SolutionMetadataService
         public Dictionary<string, List<CrmForm>> QuickFormsByEntity { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, List<CrmAppAction>> AppActionsByEntityLocation { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> WebResources { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, CrmCustomApi> CustomApis { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }

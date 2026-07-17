@@ -64,7 +64,7 @@ public sealed class SetupController : ControllerBase
             html.AppendLine("</head>");
             html.AppendLine("<body>");
             html.AppendLine("<h1>XRM Emulator Setup</h1>");
-            html.AppendLine("<nav><a href='/debug/data'>Data Browser</a> <a href='/debug/setup'>Setup</a></nav>");
+            html.AppendLine("<nav><a href='/'>Home</a> <a href='/debug/data'>Data Browser</a> <a href='/debug/setup'>Setup</a></nav>");
 
             // System Users section
             html.AppendLine("<h2>System Users</h2>");
@@ -230,13 +230,35 @@ public sealed class SetupController : ControllerBase
     }
 
     /// <summary>
-    /// Creates minimal seed data (test account + lead) directly via the admin org service.
+    /// Creates minimal seed data (kf_brand + test account + lead) directly via the admin org service.
+    /// Mirrors AppHost.cs's WithSeedData hook — useful for reseeding after a resource-level
+    /// restart/rebuild restores a stale snapshot without re-running the AppHost startup hook.
     /// Idempotent — uses UpsertRequest so calling it multiple times is safe.
     /// </summary>
     [HttpPost("seed")]
     public async Task<IActionResult> SeedData()
     {
         var results = new List<string>();
+        EntityReference? brandRef = null;
+        try
+        {
+            // KF brand — GUID matches kf-booking / AppHost seed data.
+            var kfBrandId = new Guid("79cc02f0-ef2c-f111-88b4-7ced8d484f6b");
+            var kfBrand = new Entity("kf_brand", kfBrandId)
+            {
+                ["kf_name"] = "KF",
+                ["kf_meetingbookingsitetemplateid"] = "310dfcf6-ace4-4112-97b8-4d7639bd116d",
+            };
+            await _organizationService.ExecuteAsync(new UpsertRequest { Target = kfBrand }).ConfigureAwait(false);
+            brandRef = kfBrand.ToEntityReference();
+            results.Add($"kf_brand {kfBrandId} upserted");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "kf_brand seed failed");
+            results.Add($"kf_brand FAILED: {ex.Message}");
+        }
+
         try
         {
             // Test account
@@ -245,6 +267,7 @@ public sealed class SetupController : ControllerBase
             {
                 ["name"] = "Test Partner A/S",
             };
+            if (brandRef != null) account["kf_brand"] = brandRef;
             await _organizationService.ExecuteAsync(new UpsertRequest { Target = account }).ConfigureAwait(false);
             results.Add($"account {accountId} upserted");
 

@@ -5,7 +5,7 @@ namespace XrmEmulator.MetadataSync.Models;
 public record ConnectionMetadata
 {
     public required EnvironmentMetadata Environment { get; init; }
-    public required SolutionMetadata Solution { get; init; }
+    public SolutionMetadata? Solution { get; init; }
     public required string AuthMode { get; init; }
     public string? ClientId { get; init; }
     public DateTimeOffset? SyncedAt { get; init; }

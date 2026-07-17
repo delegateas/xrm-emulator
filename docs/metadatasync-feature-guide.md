@@ -309,3 +309,23 @@ The commit flow is crash-resilient:
 - [ ] SKILL.md updated with new command documentation
 - [ ] `--help` text for the new command
 - [ ] `dotnet build` passes
+
+## Known Gaps / Backlog
+
+- **Webresource checkout pulls from local `SolutionExport/`, not the live platform.**
+  `webresource checkout` copies the content file already synced locally into `_pending/` —
+  it never calls Dataverse. If the local sync is stale (someone edited the webresource
+  directly in the platform, or in another environment folder, since the last full sync),
+  the agent edits stale content and `commit` silently overwrites the platform's newer
+  version. This has caused real incidents: a platform-side edit made outside MetadataSync
+  was clobbered because our staged file was based on an outdated local copy.
+
+  Proposed fix: `webresource checkout <name>` should fetch the current `content` (and
+  `modifiedon`) directly from Dataverse instead of reading `SolutionExport/`, and record a
+  hash of the fetched content alongside the pending file (e.g. `.data.xml` metadata or a
+  sibling `.basehash` file). At `commit` time, re-fetch the live content for that
+  webresource and compare its hash to the recorded base hash before pushing — if they
+  differ, abort that item with a clear conflict error (something changed on the platform
+  since checkout) instead of overwriting. This same stale-base-vs-live-check pattern is
+  probably worth generalizing to other checkout-based component types (views, forms, etc.),
+  not just webresources.

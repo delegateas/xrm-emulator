@@ -491,6 +491,34 @@ public static class CommitPipeline
                 f, parsed));
         }
 
+        // Plugin step enable/disable (e.g. temporarily lifting a guard plugin)
+        var pendingPluginStepStateFiles = Directory.GetFiles(pendingDir, "*.pluginstepstate.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingPluginStepStateFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<PluginStepStateDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            commitItems.Add(new CommitItem(CommitItemType.PluginStepStateChange,
+                $"Plugin Step {(parsed.Enable ? "Enable" : "Disable")}: {parsed.StepName ?? parsed.StepId.ToString()}",
+                f, parsed));
+        }
+
+        // Org-wide orgdborgsettings blob changes (SetValue or RestoreBlob/rollback) — always
+        // environment-wide, never solution-scoped, so the label always calls that out.
+        var pendingOrgDbOrgSettingFiles = Directory.GetFiles(pendingDir, "*.orgdborgsetting.json", SearchOption.AllDirectories)
+            .ToList();
+
+        foreach (var f in pendingOrgDbOrgSettingFiles)
+        {
+            var parsed = JsonSerializer.Deserialize<OrgDbOrgSettingDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            var label = parsed.Mode == OrgDbOrgSettingMode.SetValue
+                ? $"Org Setting: {parsed.SettingName} = {parsed.NewValue} [ENTIRE ENVIRONMENT: {parsed.EnvironmentUrl}]"
+                : $"Org Setting Rollback: restore from {parsed.RollbackSourceFile} [ENTIRE ENVIRONMENT: {parsed.EnvironmentUrl}]";
+            commitItems.Add(new CommitItem(CommitItemType.OrgDbOrgSetting, label, f, parsed));
+        }
+
         // Generic remove-from-solution (does NOT delete the component — only removes solution membership)
         var pendingRemoveSolutionComponentFiles = Directory.GetFiles(pendingDir, "*.removesolutioncomponent.json", SearchOption.AllDirectories)
             .ToList();
@@ -726,6 +754,7 @@ public static class CommitPipeline
             [CommitItemType.CommandBar] = 13,
             [CommitItemType.PcfControl] = 14,
             [CommitItemType.PluginRegistration] = 15,
+            [CommitItemType.PluginStepStateChange] = 15, // Independent toggle; in practice staged/committed alone
             [CommitItemType.CustomApiRegistration] = 15, // Same as plugin — runs after assembly but references plugin type
             [CommitItemType.PluginManagedIdentity] = 16, // Must run after PluginRegistration: Dataverse rejects the assembly→MI link with 0x80040216 ("Plugin assembly must be signed with valid certificate to associate to Managed Identity") if the assembly isn't yet live and Authenticode-signed.
             [CommitItemType.PluginContentUpdate] = 14, // Before PluginRegistration so a hot-fixed (signed) byte patch lands first; mostly only used standalone for cross-env patching.
@@ -743,6 +772,7 @@ public static class CommitPipeline
             [CommitItemType.EnvironmentVariable] = 20, // After entities/attributes are in place
             [CommitItemType.SecurityRoleDelete] = 18, // After role assignments are cleaned up
             [CommitItemType.SecurityRolePrivilegeRemove] = 3, // Same phase as SecurityRoleUpdate
+            [CommitItemType.OrgDbOrgSetting] = 99, // Independent — environment-wide, no dependents; runs last
         };
         commitItems.Sort((a, b) =>
         {
@@ -2084,6 +2114,25 @@ public static class CommitPipeline
                             });
                             log?.Invoke($"  App module '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
                         }
+                        else if (def.ComponentType.Equals("customcontrol", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var query = new QueryExpression("customcontrol")
+                            {
+                                ColumnSet = new ColumnSet("customcontrolid"),
+                                Criteria = new FilterExpression()
+                            };
+                            query.Criteria.AddCondition("name", ConditionOperator.Equal, def.EntityLogicalName);
+                            var result = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+                                ?? throw new InvalidOperationException($"Custom control '{def.EntityLogicalName}' not found in CRM");
+                            client.Execute(new AddSolutionComponentRequest
+                            {
+                                ComponentType = 66, // CustomControl
+                                ComponentId = result.Id,
+                                SolutionUniqueName = def.SolutionUniqueName,
+                                AddRequiredComponents = false
+                            });
+                            log?.Invoke($"  Custom control '{def.EntityLogicalName}' added to solution {def.SolutionUniqueName}. Id: {result.Id}");
+                        }
                         else
                         {
                             throw new InvalidOperationException($"Unsupported solution component type: {def.ComponentType}");
@@ -2392,6 +2441,19 @@ public static class CommitPipeline
                         break;
                     }
 
+                    case CommitItemType.PluginStepStateChange:
+                    {
+                        var def = (PluginStepStateDefinition)item.ParsedData;
+                        log?.Invoke($"{(def.Enable ? "Enabling" : "Disabling")} step {def.StepName ?? def.StepId.ToString()}");
+                        client.Execute(new SetStateRequest
+                        {
+                            EntityMoniker = new EntityReference("sdkmessageprocessingstep", def.StepId),
+                            State = new OptionSetValue(def.Enable ? 0 : 1),
+                            Status = new OptionSetValue(def.Enable ? 1 : 2),
+                        });
+                        break;
+                    }
+
                     case CommitItemType.RemoveSolutionComponent:
                     {
                         var def = (RemoveSolutionComponentDefinition)item.ParsedData;
@@ -2584,6 +2646,23 @@ public static class CommitPipeline
                         log?.Invoke($"Upserting environment variable '{single.Entry.SchemaName}' into solution '{single.SolutionUniqueName}'");
                         EnvironmentVariableWriter.UpsertSingle(client, single.SolutionUniqueName, single.Entry, log);
                         log?.Invoke($"  Environment variable upserted OK.");
+                        break;
+                    }
+
+                    case CommitItemType.OrgDbOrgSetting:
+                    {
+                        var def = (OrgDbOrgSettingDefinition)item.ParsedData;
+                        if (def.Mode == OrgDbOrgSettingMode.SetValue)
+                        {
+                            log?.Invoke($"Applying org setting '{def.SettingName}' = '{def.NewValue}' (env: {def.EnvironmentUrl})");
+                            OrgDbOrgSettingsWriter.ApplySetValue(client, def, log);
+                        }
+                        else
+                        {
+                            log?.Invoke($"Restoring orgdborgsettings backup from {def.RollbackSourceFile} (env: {def.EnvironmentUrl})");
+                            OrgDbOrgSettingsWriter.ApplyRestoreBlob(client, def, log);
+                        }
+                        resolvedOutputs[relativePath] = new Dictionary<string, string> { ["organizationId"] = def.OrganizationId.ToString() };
                         break;
                     }
                 }

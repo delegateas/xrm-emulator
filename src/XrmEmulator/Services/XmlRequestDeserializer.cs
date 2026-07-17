@@ -211,6 +211,10 @@ internal sealed class XmlRequestDeserializer : IXmlRequestDeserializer
             {
                 return DeserializeExecuteMultipleSettings(valueElement);
             }
+            else if (typeValue.Contains("entityreferencecollection", StringComparison.Ordinal))
+            {
+                return DeserializeEntityReferenceCollection(valueElement);
+            }
             else if (typeValue.Contains("entityreference", StringComparison.Ordinal))
             {
                 return DeserializeEntityReference(valueElement);
@@ -226,6 +230,10 @@ internal sealed class XmlRequestDeserializer : IXmlRequestDeserializer
             else if (typeValue.Contains("money", StringComparison.Ordinal))
             {
                 return DeserializeMoney(valueElement);
+            }
+            else if (typeValue.Contains("relationship", StringComparison.Ordinal))
+            {
+                return DeserializeRelationship(valueElement);
             }
             else if (typeValue.Contains("columnset", StringComparison.Ordinal))
             {
@@ -460,6 +468,47 @@ internal sealed class XmlRequestDeserializer : IXmlRequestDeserializer
         }
 
         return new EntityReference(logicalName, entityId);
+    }
+
+    private static EntityReferenceCollection DeserializeEntityReferenceCollection(XElement collectionElement)
+    {
+        var collection = new EntityReferenceCollection();
+
+        // Direct children are <EntityReference> elements (no wrapping "Entities" element,
+        // unlike EntityCollection) — e.g. AssociateRequest's RelatedEntities parameter.
+        var entityReferenceElements = collectionElement.Elements()
+            .Where(e => string.Equals(e.Name.LocalName, "EntityReference", StringComparison.Ordinal));
+
+        foreach (var entityRefElement in entityReferenceElements)
+        {
+            collection.Add(DeserializeEntityReference(entityRefElement));
+        }
+
+        return collection;
+    }
+
+    private static Relationship DeserializeRelationship(XElement relationshipElement)
+    {
+        var schemaNameElement = relationshipElement.Elements()
+            .FirstOrDefault(e => string.Equals(e.Name.LocalName, "SchemaName", StringComparison.Ordinal));
+
+        var relationship = new Relationship(schemaNameElement?.Value ?? string.Empty);
+
+        var primaryEntityRoleElement = relationshipElement.Elements()
+            .FirstOrDefault(e => string.Equals(e.Name.LocalName, "PrimaryEntityRole", StringComparison.Ordinal));
+        if (primaryEntityRoleElement != null)
+        {
+            var nilAttribute = primaryEntityRoleElement.Attributes()
+                .FirstOrDefault(a => string.Equals(a.Name.LocalName, "nil", StringComparison.Ordinal));
+            var isNil = nilAttribute != null && string.Equals(nilAttribute.Value, "true", StringComparison.OrdinalIgnoreCase);
+
+            if (!isNil && Enum.TryParse<EntityRole>(primaryEntityRoleElement.Value, true, out var role))
+            {
+                relationship.PrimaryEntityRole = role;
+            }
+        }
+
+        return relationship;
     }
 
     private EntityCollection DeserializeEntityCollection(XElement collectionElement)

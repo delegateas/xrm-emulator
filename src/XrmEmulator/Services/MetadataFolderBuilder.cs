@@ -19,7 +19,16 @@ public static class MetadataFolderBuilder
     /// merges them into a single combined metadata folder that XrmMockup can load.
     /// Returns the path to the combined folder.
     /// </summary>
-    public static string BuildCombinedMetadataFolder(string solutionExportsPath)
+    /// <param name="solutionExportsPath">Root path containing per-solution export directories.</param>
+    /// <param name="excludedPluginTypeNames">
+    /// Fully-qualified plugin type names to drop from the merged metadata before XrmMockup loads it.
+    /// Use this for plugins that query Dataverse system tables XrmMockup does not model (e.g.
+    /// "privilege"/"roleprivileges") and would otherwise throw "No EntityMetadata found" on execution.
+    /// Excluded here at metadata-merge time only — the real CRM registration is untouched.
+    /// </param>
+    public static string BuildCombinedMetadataFolder(
+        string solutionExportsPath,
+        IEnumerable<string>? excludedPluginTypeNames = null)
     {
         var outputDir = Path.Combine(Path.GetTempPath(), "xrm-emulator-metadata", Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(outputDir);
@@ -86,6 +95,10 @@ public static class MetadataFolderBuilder
         // checking whether PluginTypeAssemblyName starts with AssemblyName + "." which means
         // PluginTypeAssemblyName holds the type name and AssemblyName holds the assembly name.
         NormalizePluginFields(combined!);
+
+        // Exclude plugin steps that cannot function against the emulator (see method doc).
+        // Emulator-only — the real solution export/registration in CRM is untouched.
+        ExcludeUnsupportedPlugins(combined!, excludedPluginTypeNames);
 
         // Ensure required system entities exist (XrmMockup needs these to initialize)
         EnsureRequiredSystemEntities(combined!);
@@ -164,6 +177,18 @@ public static class MetadataFolderBuilder
         }
     }
 
+    private static void ExcludeUnsupportedPlugins(MetadataSkeleton skeleton, IEnumerable<string>? excludedPluginTypeNames)
+    {
+        if (skeleton.Plugins == null || excludedPluginTypeNames == null) return;
+
+        var excluded = new HashSet<string>(excludedPluginTypeNames, StringComparer.Ordinal);
+        if (excluded.Count == 0) return;
+
+        skeleton.Plugins = skeleton.Plugins
+            .Where(p => !excluded.Contains(p.AssemblyName))
+            .ToList();
+    }
+
     /// <summary>
     /// XrmMockup requires certain system entities to initialize (businessunit, systemuser, team,
     /// teammembership, transactioncurrency, organization). If any are missing from the merged
@@ -181,36 +206,36 @@ public static class MetadataFolderBuilder
             CreateAttribute<LookupAttributeMetadata>("systemuserid", AttributeTypeCode.Lookup));
 
         // Other required system entities — only add if completely missing
-        EnsureEntity(skeleton, "businessunit", OwnershipTypes.BusinessOwned,
+        EnsureEntity(skeleton, "businessunit", OwnershipTypes.BusinessOwned, "name",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("businessunitid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String),
             CreateAttribute<LookupAttributeMetadata>("parentbusinessunitid", AttributeTypeCode.Lookup));
 
-        EnsureEntity(skeleton, "systemuser", OwnershipTypes.BusinessOwned,
+        EnsureEntity(skeleton, "systemuser", OwnershipTypes.BusinessOwned, "fullname",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("systemuserid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("firstname", AttributeTypeCode.String),
             CreateAttribute<StringAttributeMetadata>("lastname", AttributeTypeCode.String),
             CreateAttribute<StringAttributeMetadata>("fullname", AttributeTypeCode.String),
             CreateAttribute<LookupAttributeMetadata>("businessunitid", AttributeTypeCode.Lookup));
 
-        EnsureEntity(skeleton, "team", OwnershipTypes.BusinessOwned,
+        EnsureEntity(skeleton, "team", OwnershipTypes.BusinessOwned, "name",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("teamid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String),
             CreateAttribute<LookupAttributeMetadata>("businessunitid", AttributeTypeCode.Lookup),
             CreateAttribute<LookupAttributeMetadata>("administratorid", AttributeTypeCode.Lookup));
 
-        EnsureEntity(skeleton, "transactioncurrency", OwnershipTypes.OrganizationOwned,
+        EnsureEntity(skeleton, "transactioncurrency", OwnershipTypes.OrganizationOwned, "currencyname",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("transactioncurrencyid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("currencyname", AttributeTypeCode.String),
             CreateAttribute<StringAttributeMetadata>("isocurrencycode", AttributeTypeCode.String),
             CreateAttribute<DecimalAttributeMetadata>("exchangerate", AttributeTypeCode.Decimal),
             CreateAttribute<IntegerAttributeMetadata>("currencyprecision", AttributeTypeCode.Integer));
 
-        EnsureEntity(skeleton, "organization", OwnershipTypes.OrganizationOwned,
+        EnsureEntity(skeleton, "organization", OwnershipTypes.OrganizationOwned, "name",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("organizationid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String));
 
-        EnsureEntity(skeleton, "role", OwnershipTypes.BusinessOwned,
+        EnsureEntity(skeleton, "role", OwnershipTypes.BusinessOwned, "name",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("roleid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String),
             CreateAttribute<LookupAttributeMetadata>("businessunitid", AttributeTypeCode.Lookup),
@@ -220,7 +245,7 @@ public static class MetadataFolderBuilder
             CreateAttribute<DateTimeAttributeMetadata>("createdon", AttributeTypeCode.DateTime),
             CreateAttribute<DateTimeAttributeMetadata>("modifiedon", AttributeTypeCode.DateTime));
 
-        EnsureEntity(skeleton, "roletemplate", OwnershipTypes.None,
+        EnsureEntity(skeleton, "roletemplate", OwnershipTypes.None, "name",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("roletemplateid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String));
 
@@ -245,17 +270,29 @@ public static class MetadataFolderBuilder
 
         // Environment variable tables — needed by any plugin that calls GetEnvironmentVariable.
         // These are standard Dataverse entities but are not included in solution exports.
-        EnsureEntity(skeleton, "environmentvariabledefinition", OwnershipTypes.OrganizationOwned,
+        EnsureEntity(skeleton, "environmentvariabledefinition", OwnershipTypes.OrganizationOwned, "schemaname",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("environmentvariabledefinitionid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("schemaname", AttributeTypeCode.String),
             CreateAttribute<StringAttributeMetadata>("defaultvalue", AttributeTypeCode.String),
             CreateAttribute<StringAttributeMetadata>("displayname", AttributeTypeCode.String),
             CreateAttribute<IntegerAttributeMetadata>("type", AttributeTypeCode.Integer));
 
-        EnsureEntity(skeleton, "environmentvariablevalue", OwnershipTypes.OrganizationOwned,
+        EnsureEntity(skeleton, "environmentvariablevalue", OwnershipTypes.OrganizationOwned, "value",
             CreateAttribute<UniqueIdentifierAttributeMetadata>("environmentvariablevalueid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<LookupAttributeMetadata>("environmentvariabledefinitionid", AttributeTypeCode.Lookup),
             CreateAttribute<StringAttributeMetadata>("value", AttributeTypeCode.String));
+
+        // Saved views (public/system) — needed by any plugin that looks up a view's FetchXML.
+        // Standard Dataverse entity, not included in solution exports. statecode/statuscode are
+        // required (not just DefaultStateStatus) — CreateRequestHandler only auto-populates them
+        // on Create when both attributes are present in metadata (Utility.IsValidAttribute).
+        EnsureEntity(skeleton, "savedquery", OwnershipTypes.OrganizationOwned, "name",
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("savedqueryid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String),
+            CreateAttribute<StringAttributeMetadata>("returnedtypecode", AttributeTypeCode.String),
+            CreateAttribute<StringAttributeMetadata>("fetchxml", AttributeTypeCode.String),
+            CreateAttribute<StateAttributeMetadata>("statecode", AttributeTypeCode.State),
+            CreateAttribute<StatusAttributeMetadata>("statuscode", AttributeTypeCode.Status));
 
         // Ensure BaseOrganization entity exists
         if (skeleton.BaseOrganization == null || skeleton.BaseOrganization.Attributes.Count == 0)
@@ -288,14 +325,26 @@ public static class MetadataFolderBuilder
 
                 EnsureEntity(skeleton, rel.IntersectEntityName, OwnershipTypes.None,
                     CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.IntersectEntityName + "id", AttributeTypeCode.Uniqueidentifier),
-                    CreateAttribute<LookupAttributeMetadata>(rel.Entity1IntersectAttribute, AttributeTypeCode.Lookup),
-                    CreateAttribute<LookupAttributeMetadata>(rel.Entity2IntersectAttribute, AttributeTypeCode.Lookup));
+                    CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.Entity1IntersectAttribute, AttributeTypeCode.Uniqueidentifier),
+                    CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.Entity2IntersectAttribute, AttributeTypeCode.Uniqueidentifier));
             }
         }
     }
 
     private static void EnsureEntity(MetadataSkeleton skeleton, string logicalName,
         OwnershipTypes ownership, params AttributeMetadata[] attributes)
+        => EnsureEntity(skeleton, logicalName, ownership, primaryNameAttribute: null, attributes);
+
+    /// <summary>
+    /// Synthesizes minimal EntityMetadata for a standard entity missing from the solution export.
+    /// Setting PrimaryNameAttribute (when the entity has a natural name column) is required even
+    /// for entities never displayed directly: XrmMockup's PopulateEntityReferenceNames resolves
+    /// the .Name of every EntityReference by looking up the *target* entity's PrimaryNameAttribute,
+    /// and throws ArgumentNullException (surfaced to callers as an opaque 406) if it's null and any
+    /// row anywhere holds a lookup pointing at this entity.
+    /// </summary>
+    private static void EnsureEntity(MetadataSkeleton skeleton, string logicalName,
+        OwnershipTypes ownership, string? primaryNameAttribute, params AttributeMetadata[] attributes)
     {
         if (skeleton.EntityMetadata.ContainsKey(logicalName))
             return;
@@ -304,6 +353,10 @@ public static class MetadataFolderBuilder
         SetMetadataProperty(entityMetadata, "LogicalName", logicalName);
         SetMetadataProperty(entityMetadata, "OwnershipType", ownership);
         SetMetadataProperty(entityMetadata, "PrimaryIdAttribute", logicalName + "id");
+        if (primaryNameAttribute != null)
+        {
+            SetMetadataProperty(entityMetadata, "PrimaryNameAttribute", primaryNameAttribute);
+        }
 
         // Set attributes via reflection (read-only property)
         SetMetadataProperty(entityMetadata, "Attributes", attributes);

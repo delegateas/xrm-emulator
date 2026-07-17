@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Lifecycle;
 using Microsoft.Extensions.DependencyInjection;
@@ -186,6 +187,31 @@ public static class XrmEmulatorExtensions
         string solutionExportsPath)
     {
         return builder.WithEnvironment("SolutionExports__Path", solutionExportsPath);
+    }
+
+    /// <summary>
+    /// Pre-configures sample request-parameter values for a Custom API on the emulator's
+    /// <c>/customapis/{uniqueName}/trigger</c> dev-tool page, so manually triggering it there —
+    /// as a stand-in for the scheduled Cloud Flow that calls it in production — starts from
+    /// realistic data instead of a blank form.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator project.</param>
+    /// <param name="customApiUniqueName">The Custom API's unique name (e.g. "kf_QualifyLead").</param>
+    /// <param name="exampleParameters">
+    /// An object whose properties match the Custom API's request parameter unique names
+    /// (e.g. <c>new { LeadId = "...", Status = 1 }</c>). Serialized to JSON and read back by the
+    /// emulator to pre-fill the trigger form. Calling this again for the same Custom API replaces
+    /// the previous example.
+    /// </param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ProjectResource> WithCustomApiExample(
+        this IResourceBuilder<ProjectResource> builder,
+        string customApiUniqueName,
+        object exampleParameters)
+    {
+        return builder.WithEnvironment(
+            $"CustomApiExamples__{customApiUniqueName}__Parameters",
+            JsonSerializer.Serialize(exampleParameters));
     }
 
     /// <summary>

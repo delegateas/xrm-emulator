@@ -20,11 +20,16 @@ public sealed class CrmController : ControllerBase
     private static readonly Serilog.ILogger _log = Log.ForContext<CrmController>();
     private readonly SolutionMetadataService _metadata;
     private readonly OrganizationServiceResolver _serviceResolver;
+    private readonly PluginRegistrationService _pluginRegistrations;
+    private readonly PluginExecutionHistoryStore _pluginHistory;
 
-    public CrmController(SolutionMetadataService metadata, OrganizationServiceResolver serviceResolver)
+    public CrmController(SolutionMetadataService metadata, OrganizationServiceResolver serviceResolver,
+        PluginRegistrationService pluginRegistrations, PluginExecutionHistoryStore pluginHistory)
     {
         _metadata = metadata;
         _serviceResolver = serviceResolver;
+        _pluginRegistrations = pluginRegistrations;
+        _pluginHistory = pluginHistory;
     }
 
     [HttpGet("")]
@@ -37,6 +42,7 @@ public sealed class CrmController : ControllerBase
         AppendHtmlHead(html, "CRM Apps");
         html.AppendLine("<body>");
         html.AppendLine("<div class='app-picker'>");
+        html.AppendLine("<nav><a href='/'>Home</a></nav>");
         html.AppendLine("<h1>Dynamics CRM Apps</h1>");
         html.AppendLine("<div class='app-grid'>");
 
@@ -350,7 +356,7 @@ public sealed class CrmController : ControllerBase
         var recordName = GetRecordName(record, entity);
         AppendHtmlHead(html, $"{recordName} - {entityDisplay}");
         html.AppendLine($"<body data-app-name='{Encode(appName)}' data-entity-name='{Encode(entityName)}' data-record-id='{recordId}'>");
-        AppendAppShell(html, app, siteMap, entityName);
+        AppendAppShell(html, app, siteMap, entityName, recordId);
 
         html.AppendLine("<div class='app-content'>");
 
@@ -394,6 +400,117 @@ public sealed class CrmController : ControllerBase
         return Content(html.ToString(), "text/html");
     }
 
+    [HttpGet("{appName}/{entityName}/plugins")]
+    [HttpGet("{appName}/{entityName}/{recordId:guid}/plugins")]
+    public IActionResult Plugins(string appName, string entityName, Guid? recordId = null)
+    {
+        var app = FindApp(appName);
+        if (app == null) return NotFound("App not found");
+
+        var siteMap = app.SiteMapUniqueName != null ? _metadata.GetSiteMap(app.SiteMapUniqueName) : null;
+        var entity = _metadata.GetEntity(entityName);
+        var registrations = _pluginRegistrations.GetForEntity(entityName);
+        var history = _pluginHistory.GetForEntity(entityName, recordId);
+
+        var html = new StringBuilder();
+        var entityDisplay = entity?.DisplayName ?? entityName;
+        AppendHtmlHead(html, $"Plugins - {entityDisplay} - {app.DisplayName}");
+        html.AppendLine("<body>");
+        AppendAppShell(html, app, siteMap, entityName, recordId);
+
+        html.AppendLine("<div class='app-content'>");
+        html.AppendLine("<div class='content-header'>");
+        html.AppendLine($"<h1>Plugins &mdash; {Encode(entityDisplay)}</h1>");
+        html.AppendLine(recordId.HasValue
+            ? $"<a href='/crm/{Encode(appName)}/{Encode(entityName)}/{recordId}' class='btn btn-secondary'>&larr; Back to record</a>"
+            : $"<a href='/crm/{Encode(appName)}/{Encode(entityName)}' class='btn btn-secondary'>&larr; Back to list</a>");
+        html.AppendLine("</div>");
+
+        html.AppendLine("<h2>Registered plugin steps</h2>");
+        if (registrations.Count == 0)
+        {
+            html.AppendLine("<div class='empty-grid'>No plugin steps are registered on this entity.</div>");
+        }
+        else
+        {
+            var groups = registrations
+                .GroupBy(p => DescribePluginAssemblyGroup(p.AssemblyName))
+                .OrderByDescending(g => g.Key.Contains("KF.PartnerService", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(g => g.Key.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var group in groups)
+            {
+                html.AppendLine($"<h3>{Encode(group.Key)} <span class='entity-count'>({group.Count()})</span></h3>");
+                html.AppendLine("<table class='view-grid'>");
+                html.AppendLine("<thead><tr><th>Plugin</th><th>Message</th><th>Stage</th><th>Mode</th><th>Filtered Attributes</th></tr></thead>");
+                html.AppendLine("<tbody>");
+                foreach (var p in group.OrderBy(p => p.Stage).ThenBy(p => p.Rank))
+                {
+                    html.AppendLine("<tr>");
+                    html.AppendLine($"<td>{Encode(p.Name)}</td>");
+                    html.AppendLine($"<td>{Encode(p.MessageName)}</td>");
+                    html.AppendLine($"<td>{Encode(DescribePluginStage(p.Stage))}</td>");
+                    html.AppendLine($"<td>{Encode(p.Mode == 1 ? "Async" : "Sync")}</td>");
+                    html.AppendLine($"<td>{Encode(p.FilteredAttributes ?? "")}</td>");
+                    html.AppendLine("</tr>");
+                }
+                html.AppendLine("</tbody></table>");
+            }
+        }
+
+        html.AppendLine($"<h2>Execution history{(recordId.HasValue ? " (this record)" : "")}</h2>");
+        if (history.Count == 0)
+        {
+            html.AppendLine("<div class='empty-grid'>No recorded executions yet. Trigger the plugin (e.g. update a filtered field) and refresh this page.</div>");
+        }
+        else
+        {
+            html.AppendLine("<table class='view-grid'>");
+            html.AppendLine("<thead><tr><th>Timestamp (UTC)</th><th>Plugin</th><th>Message</th><th>Stage</th><th>Record</th><th>Result</th></tr></thead>");
+            html.AppendLine("<tbody>");
+            foreach (var h in history)
+            {
+                var result = h.Success ? "OK" : $"Error: {Encode(h.Error ?? "")}";
+                var resultStyle = h.Success ? "" : " style='color:#b00020'";
+                html.AppendLine("<tr>");
+                html.AppendLine($"<td>{h.Timestamp:yyyy-MM-dd HH:mm:ss}</td>");
+                html.AppendLine($"<td>{Encode(h.PluginTypeName)}</td>");
+                html.AppendLine($"<td>{Encode(h.MessageName)}</td>");
+                html.AppendLine($"<td>{Encode(h.Stage)}</td>");
+                html.AppendLine($"<td><a href='/crm/{Encode(appName)}/{Encode(entityName)}/{h.EntityId}'>{h.EntityId}</a></td>");
+                html.AppendLine($"<td{resultStyle}>{result}</td>");
+                html.AppendLine("</tr>");
+            }
+            html.AppendLine("</tbody></table>");
+        }
+
+        html.AppendLine("</div>"); // app-content
+        html.AppendLine("</div>"); // app-shell
+        html.AppendLine("</body></html>");
+        return Content(html.ToString(), "text/html");
+    }
+
+    private static string DescribePluginStage(int stage) => stage switch
+    {
+        10 => "Pre-validation",
+        20 => "Pre-operation",
+        40 => "Post-operation",
+        _ => stage.ToString(),
+    };
+
+    // Collapses the many built-in Microsoft.* plugin assemblies (data archival, extensibility, etc.)
+    // into a single bucket so they don't crowd out the handful of KF-authored ones in the grouped view.
+    private static string DescribePluginAssemblyGroup(string? assemblyName)
+    {
+        if (string.IsNullOrEmpty(assemblyName))
+            return "(unknown assembly)";
+
+        return assemblyName.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase)
+            ? "Microsoft (system plugins)"
+            : assemblyName;
+    }
+
     [HttpPost("{appName}/{entityName}/{recordId:guid}")]
     public async Task<IActionResult> SaveRecord(string appName, string entityName, Guid recordId)
     {
@@ -404,6 +521,7 @@ public sealed class CrmController : ControllerBase
         try
         {
             var orgService = app != null ? _serviceResolver.GetForApp(app) : _serviceResolver.Default;
+            var current = await orgService.RetrieveAsync(entityName, recordId, new ColumnSet(true)).ConfigureAwait(false);
             var updateEntity = new Entity(entityName, recordId);
 
             foreach (var kvp in formData)
@@ -418,10 +536,16 @@ public sealed class CrmController : ControllerBase
                 var attrType = attrMeta?.Type ?? "nvarchar";
 
                 var typedValue = ConvertToTypedValue(rawValue, attrType);
-                if (typedValue != null)
+
+                // The HTML form POSTs every field on the page, including ones the user never
+                // touched. Only include a field in Target if its value actually changed from
+                // what's currently stored — otherwise every untouched blank field would be sent
+                // as an explicit null, making Entity.Contains() true for it and breaking plugins
+                // that use Contains() to detect caller intent (e.g. a "don't clobber an
+                // explicitly-set status" guard).
+                var currentValue = current.Contains(fieldName) ? current[fieldName] : null;
+                if (!ValuesEqual(currentValue, typedValue))
                     updateEntity[fieldName] = typedValue;
-                else if (string.IsNullOrEmpty(rawValue))
-                    updateEntity[fieldName] = null;
             }
 
             if (updateEntity.Attributes.Count > 0)
@@ -465,7 +589,7 @@ public sealed class CrmController : ControllerBase
         html.AppendLine("</head>");
     }
 
-    private static void AppendAppShell(StringBuilder html, CrmApp app, CrmSiteMap? siteMap, string activeEntity)
+    private static void AppendAppShell(StringBuilder html, CrmApp app, CrmSiteMap? siteMap, string activeEntity, Guid? recordId = null)
     {
         html.AppendLine("<div class='app-shell'>");
 
@@ -473,8 +597,13 @@ public sealed class CrmController : ControllerBase
         html.AppendLine("<div class='app-header'>");
         html.AppendLine($"<span class='app-title'>{Encode(app.DisplayName)}</span>");
         html.AppendLine("<span class='header-spacer'></span>");
+        html.AppendLine("<a href='/'>Home</a>");
         html.AppendLine("<a href='/crm/'>Switch App</a>");
         html.AppendLine("<a href='/debug/data'>Debug Data</a>");
+        var pluginsHref = recordId.HasValue
+            ? $"/crm/{Encode(app.UniqueName)}/{Encode(activeEntity)}/{recordId}/plugins"
+            : $"/crm/{Encode(app.UniqueName)}/{Encode(activeEntity)}/plugins";
+        html.AppendLine($"<a href='{pluginsHref}'>Plugins</a>");
         html.AppendLine("</div>");
 
         // Sidebar
@@ -997,6 +1126,23 @@ public sealed class CrmController : ControllerBase
             "bit" or "boolean" => bool.TryParse(rawValue, out var b) ? b : null,
             "picklist" or "state" or "status" => int.TryParse(rawValue, out var osv) ? new OptionSetValue(osv) : null,
             _ => rawValue
+        };
+    }
+
+    // Compares a currently-stored attribute value against a form-submitted, freshly-typed one so
+    // SaveRecord can skip fields that didn't actually change (see call site for why that matters).
+    private static bool ValuesEqual(object? current, object? incoming)
+    {
+        if (current == null && incoming == null) return true;
+        if (current == null || incoming == null) return false;
+
+        return (current, incoming) switch
+        {
+            (OptionSetValue a, OptionSetValue b) => a.Value == b.Value,
+            (Money a, Money b) => a.Value == b.Value,
+            (EntityReference a, EntityReference b) => a.Id == b.Id,
+            (DateTime a, DateTime b) => a == b,
+            _ => Equals(current, incoming)
         };
     }
 

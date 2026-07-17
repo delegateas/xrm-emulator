@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Text;
 using DG.Tools.XrmMockup;
 using Microsoft.AspNetCore.OData;
 using Microsoft.OData.Edm;
@@ -103,7 +105,13 @@ if (!string.IsNullOrEmpty(explicitMetadataPath))
 else if (!string.IsNullOrEmpty(solutionExportsPathForMetadata))
 {
     Log.Information("XrmMockup: Building combined metadata from solution exports at {Path}", solutionExportsPathForMetadata);
-    metadataDirectoryPath = MetadataFolderBuilder.BuildCombinedMetadataFolder(solutionExportsPathForMetadata);
+
+    // Comma-separated fully-qualified plugin type names to drop from the merged metadata —
+    // for plugins that query Dataverse system tables XrmMockup doesn't model (e.g. "privilege").
+    var excludedPluginTypeNames = builder.Configuration.GetValue<string>("SolutionExports:ExcludedPluginTypeNames")
+        ?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    metadataDirectoryPath = MetadataFolderBuilder.BuildCombinedMetadataFolder(solutionExportsPathForMetadata, excludedPluginTypeNames);
     Log.Information("XrmMockup: Combined metadata written to {Path}", metadataDirectoryPath);
 }
 else
@@ -111,13 +119,25 @@ else
     metadataDirectoryPath = "Metadata";
 }
 
+// Load the KF CRM plugin assembly (built separately for net462) so plugins actually execute
+var pluginAssemblyPath = builder.Configuration.GetValue<string>("PluginAssembly:Path");
+var basePluginTypes = XrmEmulator.Services.PluginAssemblyBridge.TryLoadBasePluginTypes(pluginAssemblyPath, Log.Logger);
+
+// CodeActivity-derived types (e.g. local no-op stubs for ISV workflow activities) from the
+// same plugin assembly, so classic workflows with custom code-activity steps can execute.
+var codeActivityInstanceTypes = XrmEmulator.Services.PluginAssemblyBridge.TryLoadCodeActivityTypes(Log.Logger);
+
+// Independently reads the same combined Metadata.xml for the /plugins dev-tool route
+builder.Services.AddSingleton(new PluginRegistrationService(metadataDirectoryPath));
+
 // Register XrmMockup365 instance
 builder.Services.AddSingleton<XrmMockup365>(provider =>
 {
     var settings = new XrmMockupSettings
     {
-        BasePluginTypes = [],
+        BasePluginTypes = basePluginTypes,
         BaseCustomApiTypes = [],
+        CodeActivityInstanceTypes = codeActivityInstanceTypes,
         EnableProxyTypes = false,
         IncludeAllWorkflows = true,
         MetadataDirectoryPath = metadataDirectoryPath,
@@ -148,6 +168,24 @@ builder.Services.AddScoped<IRequestMapper, RequestMapper>();
 builder.Services.AddScoped<IXmlRequestDeserializer, XmlRequestDeserializer>();
 builder.Services.AddScoped<IXmlResponseSerializer, XmlResponseSerializer>();
 
+// Configure plugin execution history persistence
+builder.Services.Configure<PluginExecutionHistoryOptions>(options =>
+{
+    options.FilePath = builder.Configuration.GetValue<string>("PluginExecutionHistory:FilePath")
+        ?? "./xrm-emulator-plugin-executions.jsonl";
+    options.MaxEntries = builder.Configuration.GetValue<int>("PluginExecutionHistory:MaxEntries", 500);
+});
+builder.Services.AddSingleton<PluginExecutionHistoryStore>();
+
+// Configure Custom API execution history persistence (manual-trigger dev tool, see CustomApiController)
+builder.Services.Configure<CustomApiExecutionHistoryOptions>(options =>
+{
+    options.FilePath = builder.Configuration.GetValue<string>("CustomApiExecutionHistory:FilePath")
+        ?? "./xrm-emulator-customapi-executions.jsonl";
+    options.MaxEntries = builder.Configuration.GetValue<int>("CustomApiExecutionHistory:MaxEntries", 500);
+});
+builder.Services.AddSingleton<CustomApiExecutionHistoryStore>();
+
 // Register solution metadata service and per-app organization service resolver
 var solutionExportsPath = builder.Configuration.GetValue<string>("SolutionExports:Path");
 builder.Services.AddSingleton(new SolutionMetadataService(solutionExportsPath));
@@ -155,6 +193,7 @@ builder.Services.AddSingleton(provider =>
     new OrganizationServiceResolver(
         provider.GetRequiredService<IOrganizationServiceAsync>(),
         provider.GetService<XrmMockup365>()));
+builder.Services.AddSingleton<CustomApiExecutionService>();
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
@@ -206,8 +245,11 @@ app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapHealthChecks("/alive");
 
-// Redirect root to debug data page
-app.MapGet("/", () => Results.Redirect("/debug/data"));
+// Welcome dashboard — tile overview linking to every page the emulator exposes.
+app.MapGet("/", (SolutionMetadataService solutionMetadata) =>
+    Results.Content(
+        BuildWelcomePage(solutionMetadata.IsConfigured, app.Environment.IsDevelopment(), solutionMetadata.CustomApis.Count > 0),
+        "text/html"));
 
 app.MapGet("/XRMServices/2011/Organization.svc/web", (HttpContext context) =>
 {
@@ -218,6 +260,9 @@ app.MapGet("/XRMServices/2011/Organization.svc/web", (HttpContext context) =>
     return Task.CompletedTask;
 });
 
+// Force eager construction so it starts listening for PluginExecutionAudit.Executed immediately
+app.Services.GetRequiredService<PluginExecutionHistoryStore>();
+
 // Restore snapshot on startup
 var snapshotService = app.Services.GetRequiredService<ISnapshotService>();
 if (snapshotService is SnapshotService snapshotServiceImpl)
@@ -226,6 +271,55 @@ if (snapshotService is SnapshotService snapshotServiceImpl)
 }
 
 app.Run();
+
+// Renders the "/" welcome dashboard: a tile per page the emulator exposes, matching the
+// /crm app-picker's visual style (shares wwwroot/crm/styles.css) so the two feel like one app.
+static string BuildWelcomePage(bool crmConfigured, bool swaggerEnabled, bool customApisConfigured)
+{
+    var tiles = new[]
+    {
+        ("Data Browser", "/debug/data", "Browse all entities and records as HTML tables.", true),
+        ("CRM Emulator UI", "/crm", "Browse app modules with real forms, views, and sitemaps.", crmConfigured),
+        ("Setup", "/debug/setup", "Create test users, teams, and seed data.", true),
+        ("Custom APIs", "/customapis", "List and manually trigger Custom APIs — a stand-in for scheduled Cloud Flows that call them.", customApisConfigured),
+        ("Swagger / API Docs", "/swagger", "Explore and call the Dataverse Fake API directly.", swaggerEnabled),
+    };
+
+    var html = new StringBuilder();
+    html.AppendLine("<!DOCTYPE html>");
+    html.AppendLine("<html>");
+    html.AppendLine("<head>");
+    html.AppendLine("<title>XRM Emulator</title>");
+    html.AppendLine("<meta charset='utf-8'>");
+    html.AppendLine("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+    html.AppendLine("<link rel='stylesheet' href='/crm/styles.css'>");
+    html.AppendLine("</head>");
+    html.AppendLine("<body>");
+    html.AppendLine("<div class='app-picker'>");
+    html.AppendLine("<h1>XRM Emulator</h1>");
+    html.AppendLine("<p>Local Dataverse stand-in, powered by XrmMockup.</p>");
+    html.AppendLine("<div class='app-grid'>");
+
+    foreach (var (title, href, description, enabled) in tiles)
+    {
+        html.AppendLine($"<div class='app-card{(enabled ? "" : " app-card-disabled")}'>");
+        if (enabled)
+            html.AppendLine($"<a href='{href}'>");
+        html.AppendLine($"<h2>{WebUtility.HtmlEncode(title)}</h2>");
+        html.AppendLine($"<p>{WebUtility.HtmlEncode(description)}</p>");
+        if (!enabled)
+            html.AppendLine("<span class='entity-count'>Not configured</span>");
+        if (enabled)
+            html.AppendLine("</a>");
+        html.AppendLine("</div>");
+    }
+
+    html.AppendLine("</div>");
+    html.AppendLine("</div>");
+    html.AppendLine("</body>");
+    html.AppendLine("</html>");
+    return html.ToString();
+}
 
 // Make the Program class public for testing
 #pragma warning disable S1118 // Utility classes should not have public constructors
