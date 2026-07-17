@@ -1,6 +1,11 @@
 using System.Text.Json;
-using DG.Tools.XrmMockup;
 using Microsoft.Extensions.Options;
+// NOTE: The live CRUD-plugin feed depends on DG.Tools.XrmMockup's PluginExecutionAudit hook, which
+// only exists as a local (unpushed) patch to the XrmMockup submodule and therefore breaks the CI
+// build. Disabled for now — see the commented block below to re-enable once that hook lands upstream
+// (or in a fork the team controls). Custom API history (CustomApiExecutionHistoryStore) and the
+// registered-step list (PluginRegistrationService) are unaffected — they need no XrmMockup change.
+// using DG.Tools.XrmMockup;
 
 namespace XrmEmulator.Services;
 
@@ -23,9 +28,10 @@ public class PluginExecutionHistoryEntry
 }
 
 /// <summary>
-/// Subscribes to <see cref="PluginExecutionAudit.Executed"/> and persists a rolling window of plugin
-/// executions as JSON lines, so the `/plugins` dev-tool route (CrmController) can show what actually
-/// ran — across process restarts too, as long as the snapshot data directory is reused.
+/// Persists a rolling window of CRUD-triggered plugin executions as JSON lines, so the `/plugins`
+/// dev-tool route (CrmController) can show what actually ran — across process restarts too, as long as
+/// the snapshot data directory is reused. The live feed (subscribing to XrmMockup's PluginExecutionAudit
+/// hook) is currently disabled; see the file header. Reads back whatever history is already on disk.
 /// </summary>
 public class PluginExecutionHistoryStore
 {
@@ -39,7 +45,8 @@ public class PluginExecutionHistoryStore
         _options = options.Value;
         _logger = logger;
         _entries = Load();
-        PluginExecutionAudit.Executed += OnExecuted;
+        // Disabled — depends on the XrmMockup PluginExecutionAudit patch (see file header).
+        // PluginExecutionAudit.Executed += OnExecuted;
     }
 
     private List<PluginExecutionHistoryEntry> Load()
@@ -68,6 +75,10 @@ public class PluginExecutionHistoryStore
         }
     }
 
+    // Disabled — re-enable together with the `PluginExecutionAudit.Executed += OnExecuted` subscription
+    // above once the XrmMockup PluginExecutionAudit hook is available on CI (upstream or a team fork).
+    // PluginExecutionRecord is the XrmMockup-side type raised by that hook.
+    /*
     private void OnExecuted(PluginExecutionRecord record)
     {
         var entry = new PluginExecutionHistoryEntry
@@ -102,6 +113,7 @@ public class PluginExecutionHistoryStore
             }
         }
     }
+    */
 
     public IReadOnlyList<PluginExecutionHistoryEntry> GetForEntity(string entityLogicalName, Guid? recordId = null)
     {

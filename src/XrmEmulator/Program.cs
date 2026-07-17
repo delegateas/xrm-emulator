@@ -260,7 +260,8 @@ app.MapGet("/XRMServices/2011/Organization.svc/web", (HttpContext context) =>
     return Task.CompletedTask;
 });
 
-// Force eager construction so it starts listening for PluginExecutionAudit.Executed immediately
+// Eagerly construct so any on-disk history is loaded up front. (The live PluginExecutionAudit
+// subscription is disabled — see PluginExecutionHistoryStore's file header.)
 app.Services.GetRequiredService<PluginExecutionHistoryStore>();
 
 // Restore snapshot on startup

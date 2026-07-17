@@ -121,6 +121,26 @@ public static class XrmEmulatorExtensions
     }
 
     /// <summary>
+    /// Points the plugin/custom-API execution-history logs at a data directory (alongside the
+    /// snapshot) instead of the emulator's working directory. Keeps runtime logs — which contain
+    /// real record ids — out of the source tree.
+    /// </summary>
+    /// <param name="builder">The resource builder for the XRM Emulator project.</param>
+    /// <param name="dataDirectory">Directory where the execution-history .jsonl files are written.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    public static IResourceBuilder<ProjectResource> WithExecutionHistoryPersistence(
+        this IResourceBuilder<ProjectResource> builder,
+        string dataDirectory)
+    {
+        builder.WithEnvironment("PluginExecutionHistory__FilePath",
+            Path.Combine(dataDirectory, "xrm-emulator-plugin-executions.jsonl"));
+        builder.WithEnvironment("CustomApiExecutionHistory__FilePath",
+            Path.Combine(dataDirectory, "xrm-emulator-customapi-executions.jsonl"));
+
+        return builder;
+    }
+
+    /// <summary>
     /// Disables snapshot persistence for the XRM Emulator.
     /// Useful for test scenarios where you want a clean state on each run.
     /// </summary>

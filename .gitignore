@@ -8,3 +8,8 @@ spikes
 private.key
 data
 tests/XrmEmulator.Tests/screenshots
+
+# Emulator runtime state — contains real record ids, written next to the snapshot in the
+# host's data directory when run via the AppHost. These patterns catch standalone runs.
+xrm-emulator-*-executions.jsonl
+xrm-emulator-snapshot.zip
