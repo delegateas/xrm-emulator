@@ -365,6 +365,16 @@ public static class MarkdownGenerator
         File.WriteAllText(Path.Combine(modelDir, "plugins.md"), sb.ToString());
     }
 
+    /// <summary>
+    /// Regenerates Model/security-roles.md on its own, without touching the rest of the model.
+    /// </summary>
+    public static void GenerateSecurityRolesOnly(List<SecurityRole>? securityRoles, string outputDir)
+    {
+        var modelDir = Path.Combine(Path.GetFullPath(outputDir), "Model");
+        Directory.CreateDirectory(modelDir);
+        GenerateSecurityRoles(securityRoles, modelDir);
+    }
+
     private static void GenerateSecurityRoles(
         List<SecurityRole>? securityRoles,
         string modelDir)
@@ -402,14 +412,14 @@ public static class MarkdownGenerator
 
             if (role.Privileges is { Count: > 0 })
             {
-                sb.AppendLine("| Privilege | Access Rights | Depth |");
+                sb.AppendLine("| Entity | Access Rights | Depth |");
                 sb.AppendLine("|---|---|---|");
 
-                foreach (var (privName, rights) in role.Privileges.OrderBy(p => p.Key))
+                foreach (var (entityName, rights) in role.Privileges.OrderBy(p => p.Key))
                 {
                     foreach (var (accessRight, rolPriv) in rights.OrderBy(r => r.Key))
                     {
-                        sb.AppendLine($"| {privName} | {accessRight} | {rolPriv.PrivilegeDepth} |");
+                        sb.AppendLine($"| {entityName} | {accessRight} | {rolPriv.PrivilegeDepth} |");
                     }
                 }
 

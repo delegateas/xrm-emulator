@@ -201,7 +201,7 @@ try
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("security-role", StringComparison.OrdinalIgnoreCase))
     {
-        HandleSecurityRoleCommand(positionalArgs, args);
+        await HandleSecurityRoleCommand(positionalArgs, args, configuration, noCache);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("workflow", StringComparison.OrdinalIgnoreCase))
     {
@@ -2166,6 +2166,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]environment-variable add[/] <schema-name> --display-name \"<n>\" [[--type String|Number|Boolean|JSON|Secret]] [[--default-value \"<v>\"]]  Stage a new environment variable");
     AnsiConsole.MarkupLine("  [bold]delete[/] <entity> <guid> [[--cascade]]                Delete a record (--cascade removes restrict-delete children first)");
     AnsiConsole.MarkupLine("  [bold]user access[/] <id|email|name> [[--json]]             List a user's direct roles, team memberships, and team-granted roles");
+    AnsiConsole.MarkupLine("  [bold]security-role add[/] <role> <entity> <access> [[depth]]  Stage a privilege on a security role");
+    AnsiConsole.MarkupLine("  [bold]security-role sync[/]                                 Refresh SecurityRoles/ + security-roles.md from CRM (no full sync)");
     AnsiConsole.MarkupLine("  [bold]orgsetting list[/] [[--json]]                          List every setting in orgdborgsettings (live, entire environment)");
     AnsiConsole.MarkupLine("  [bold]orgsetting get[/] <name> [[--json]]                    Show one orgdborgsettings value (live)");
     AnsiConsole.MarkupLine("  [bold]orgsetting set[/] <name> <value>                     Stage an orgdborgsettings change (entire environment)");
@@ -4899,7 +4901,11 @@ static async Task HandleOrgSettingRollbackCommand(string[] positionalArgs, strin
 // ──────────────────────────────────────────────────────────────
 // security-role update|add — manage security role privileges
 // ──────────────────────────────────────────────────────────────
-static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
+static async Task HandleSecurityRoleCommand(
+    string[] positionalArgs,
+    string[] allArgs,
+    IConfiguration configuration,
+    bool noCache)
 {
     if (positionalArgs.Length < 2)
     {
@@ -4911,6 +4917,9 @@ static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
 
     switch (subCommand)
     {
+        case "sync":
+            await HandleSecurityRoleSyncCommand(configuration, noCache);
+            break;
         case "add":
             HandleSecurityRoleAddCommand(positionalArgs);
             break;
@@ -4931,6 +4940,35 @@ static void HandleSecurityRoleCommand(string[] positionalArgs, string[] allArgs)
             Environment.Exit(1);
             break;
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// security-role sync — refresh SecurityRoles/ without a full metadata sync
+// ──────────────────────────────────────────────────────────────
+// A full sync pulls tens of megabytes of entity metadata; roles change far more
+// often than that. This re-reads roles + roleprivileges only and rewrites
+// SecurityRoles/*.xml, TypeDeclarations.cs and Model/security-roles.md in place.
+static async Task HandleSecurityRoleSyncCommand(IConfiguration configuration, bool noCache)
+{
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    AnsiConsole.MarkupLine("[grey]Reading security roles and role privileges...[/]");
+    var securityRoles = SecurityRoleReader.Read(client);
+
+    MetadataSerializer.SerializeSecurityRoles(baseDir, securityRoles);
+    MarkdownGenerator.GenerateSecurityRolesOnly(securityRoles, baseDir);
+
+    var withPrivileges = securityRoles.Count(r => r.Privileges.Count > 0);
+    AnsiConsole.MarkupLine(
+        $"[green]Wrote {securityRoles.Count} roles[/] ([bold]{withPrivileges}[/] with privileges) to [grey]{Markup.Escape(Path.Combine(baseDir, "SecurityRoles"))}[/]");
+    AnsiConsole.MarkupLine($"[grey]Updated TypeDeclarations.cs and Model/security-roles.md[/]");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -5094,7 +5132,12 @@ static void PrintSecurityRoleUsage()
 {
     AnsiConsole.MarkupLine("[bold]MetadataSync security-role[/] — manage security role privileges");
     AnsiConsole.WriteLine();
-    AnsiConsole.MarkupLine("  [yellow]add[/] <role-name> <entity> <access> [depth]");
+    AnsiConsole.MarkupLine("  [yellow]sync[/]");
+    AnsiConsole.MarkupLine("    Re-read all roles + privileges from CRM and rewrite SecurityRoles/*.xml,");
+    AnsiConsole.MarkupLine("    TypeDeclarations.cs and Model/security-roles.md. Reads live (no pending file).");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role sync[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]add[/] <role-name> <entity> <access> [[depth]]");
     AnsiConsole.MarkupLine("    Add a privilege to a security role. Merges with existing pending file if present.");
     AnsiConsole.MarkupLine("    [grey]Access: Create, Read, Write, Delete, Append, AppendTo, Assign, Share[/]");
     AnsiConsole.MarkupLine("    [grey]Depth:  Basic, Local, Deep, Global (default: Global)[/]");
@@ -5113,7 +5156,7 @@ static void PrintSecurityRoleUsage()
     AnsiConsole.MarkupLine("    Stage deletion of a security role from CRM (all BU copies removed).");
     AnsiConsole.MarkupLine("    [grey]Example: security-role delete \"_Role_AppUser_KF-Integration\"[/]");
     AnsiConsole.WriteLine();
-    AnsiConsole.MarkupLine("  [yellow]remove-privilege[/] <role-name> <entity> <access> [depth]");
+    AnsiConsole.MarkupLine("  [yellow]remove-privilege[/] <role-name> <entity> <access> [[depth]]");
     AnsiConsole.MarkupLine("    Remove a specific privilege from a role. Other privileges are untouched.");
     AnsiConsole.MarkupLine("    [grey]Example: security-role remove-privilege \"_Role_SalesData_Owner\" kf_partnerformresponse Create Global[/]");
 }

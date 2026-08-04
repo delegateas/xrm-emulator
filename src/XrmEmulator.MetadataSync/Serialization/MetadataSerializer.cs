@@ -55,21 +55,33 @@ public static class MetadataSerializer
         // Serialize security roles
         if (securityRoles is { Count: > 0 })
         {
-            var rolesDir = Path.Combine(outputDir, "SecurityRoles");
-            Directory.CreateDirectory(rolesDir);
-
-            foreach (var role in securityRoles)
-            {
-                var safeName = SanitizeFileName(role.Name);
-                SerializeToFile(role, Path.Combine(rolesDir, $"{safeName}.xml"));
-            }
-
-            // Generate TypeDeclarations.cs with security role GUID constants
-            GenerateTypeDeclarations(securityRoles, outputDir);
+            SerializeSecurityRoles(outputDir, securityRoles);
         }
 
         // Generate agent-friendly markdown model
         MarkdownGenerator.Generate(options, entityMetadata, defaultStateStatus, plugins, optionSets, securityRoles);
+    }
+
+    /// <summary>
+    /// Writes SecurityRoles/*.xml and TypeDeclarations.cs. Stale role files are removed
+    /// first so roles deleted in CRM don't linger in the export.
+    /// </summary>
+    public static void SerializeSecurityRoles(string outputDir, List<SecurityRole> securityRoles)
+    {
+        var rolesDir = Path.Combine(outputDir, "SecurityRoles");
+        Directory.CreateDirectory(rolesDir);
+
+        foreach (var staleFile in Directory.GetFiles(rolesDir, "*.xml"))
+            File.Delete(staleFile);
+
+        foreach (var role in securityRoles)
+        {
+            var safeName = SanitizeFileName(role.Name);
+            SerializeToFile(role, Path.Combine(rolesDir, $"{safeName}.xml"));
+        }
+
+        // Generate TypeDeclarations.cs with security role GUID constants
+        GenerateTypeDeclarations(securityRoles, outputDir);
     }
 
     private static void SerializeToFile<T>(T obj, string filePath)
