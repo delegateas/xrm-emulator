@@ -81,8 +81,24 @@ public static class PluginAssemblyBridge
             log.Information("PluginAssemblyBridge: loaded {Count} plugin type(s) from {Assembly}: {Types}",
                 pluginTypes.Length, assembly.FullName, string.Join(", ", pluginTypes.Select(t => t.Name)));
 
-            // RegisterDirectPlugins scans the whole owning assembly from a single representative type.
-            return [pluginTypes[0]];
+            // RegisterDirectPlugins scans the whole owning assembly from a single representative
+            // type, but only accepts types whose BaseType is object. Plugins built on a shared
+            // abstract base are therefore invisible to it and would never fire. Those are picked up
+            // by RegisterPlugins instead, which matches types whose BaseType is one of the entries
+            // returned here — so hand it every abstract plugin base in the assembly as well.
+            var pluginBaseTypes = pluginTypes
+                .Select(t => t.BaseType)
+                .Where(b => b != null && b != typeof(object) && b!.IsAbstract && typeof(IPlugin).IsAssignableFrom(b))
+                .Distinct()
+                .ToArray();
+
+            if (pluginBaseTypes.Length > 0)
+            {
+                log.Information("PluginAssemblyBridge: registering {Count} plugin base type(s): {Types}",
+                    pluginBaseTypes.Length, string.Join(", ", pluginBaseTypes.Select(t => t!.Name)));
+            }
+
+            return [pluginTypes[0], .. pluginBaseTypes!];
         }
         catch (ReflectionTypeLoadException ex)
         {

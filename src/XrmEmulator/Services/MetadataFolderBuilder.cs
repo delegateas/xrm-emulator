@@ -26,9 +26,16 @@ public static class MetadataFolderBuilder
     /// "privilege"/"roleprivileges") and would otherwise throw "No EntityMetadata found" on execution.
     /// Excluded here at metadata-merge time only — the real CRM registration is untouched.
     /// </param>
+    /// <param name="includeRolePrivileges">
+    /// When false, security roles are copied with their privilege lists emptied. XrmMockup only
+    /// enforces access for entities some role mentions, so stripping privileges turns role-based
+    /// authorisation off wholesale while keeping every role present by name and id. Use it for
+    /// suites written before the export carried real privileges; leave it true everywhere else.
+    /// </param>
     public static string BuildCombinedMetadataFolder(
         string solutionExportsPath,
-        IEnumerable<string>? excludedPluginTypeNames = null)
+        IEnumerable<string>? excludedPluginTypeNames = null,
+        bool includeRolePrivileges = true)
     {
         var outputDir = Path.Combine(Path.GetTempPath(), "xrm-emulator-metadata", Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(outputDir);
@@ -62,6 +69,12 @@ public static class MetadataFolderBuilder
         // its DB and throws on a duplicate id.
         var seenWorkflowIds = new HashSet<Guid>();
 
+        // MetadataSkeleton.Merge only merges EntityMetadata and DefaultStateStatus — plugin steps
+        // from every solution after the first are dropped. Collect them here instead, so a step
+        // registered in one solution still fires when another solution is loaded first.
+        var mergedPlugins = new List<MetaPlugin>();
+        var seenPluginKeys = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var metadataFile in metadataFiles)
         {
             MetadataSkeleton skeleton;
@@ -79,14 +92,19 @@ public static class MetadataFolderBuilder
                 combined.Merge(skeleton);
             }
 
+            CollectPlugins(skeleton, mergedPlugins, seenPluginKeys);
+
             // Copy SecurityRoles and Workflows from this solution's directory
             var solutionDir = Path.GetDirectoryName(metadataFile)!;
-            CopySecurityRoleFiles(Path.Combine(solutionDir, "SecurityRoles"), securityRolesDir, seenRoleIds);
+            CopySecurityRoleFiles(Path.Combine(solutionDir, "SecurityRoles"), securityRolesDir, seenRoleIds,
+                includeRolePrivileges);
             CopyWorkflowFiles(Path.Combine(solutionDir, "Workflows"), workflowsDir, seenWorkflowIds);
 
             // Convert solution export workflows/business rules (XAML format) to DataContract format
             ConvertSolutionExportWorkflows(solutionDir, workflowsDir, seenWorkflowIds);
         }
+
+        combined!.Plugins = mergedPlugins;
 
         // Normalise MetaPlugin fields to the convention MetadataRegistrationStrategy expects:
         //   AssemblyName          = fully-qualified type name   (e.g. "My.Assembly.MyPlugin")
@@ -106,6 +124,9 @@ public static class MetadataFolderBuilder
         // Ensure every N:N relationship has its intersect entity in metadata, so Associate /
         // RetrieveMultiple against the intersect works (solution exports omit intersect entities).
         EnsureManyToManyIntersectEntities(combined!);
+
+        // Give every entity non-null relationship collections (see method doc).
+        EnsureRelationshipCollections(combined!);
 
         // Write combined Metadata.xml
         var outputPath = Path.Combine(outputDir, "Metadata.xml");
@@ -159,6 +180,37 @@ public static class MetadataFolderBuilder
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Appends a solution's plugin steps to the merged list, skipping ones already contributed by
+    /// an earlier solution. The same step can legitimately be exported from two solutions when both
+    /// include the plugin assembly; XrmMockup would then run it twice on a single message.
+    /// Identity is the registration itself (type + message + entity + stage + mode + rank +
+    /// filtering attributes), not the step Name, which is not unique across assemblies.
+    /// </summary>
+    private static void CollectPlugins(
+        MetadataSkeleton skeleton,
+        List<MetaPlugin> mergedPlugins,
+        HashSet<string> seenPluginKeys)
+    {
+        if (skeleton.Plugins == null) return;
+
+        foreach (var plugin in skeleton.Plugins)
+        {
+            var key = string.Join("|",
+                plugin.AssemblyName,
+                plugin.PluginTypeAssemblyName,
+                plugin.MessageName,
+                plugin.PrimaryEntity,
+                plugin.Stage,
+                plugin.Mode,
+                plugin.Rank,
+                plugin.FilteredAttributes);
+
+            if (seenPluginKeys.Add(key))
+                mergedPlugins.Add(plugin);
+        }
     }
 
     private static void NormalizePluginFields(MetadataSkeleton skeleton)
@@ -249,16 +301,21 @@ public static class MetadataFolderBuilder
             CreateAttribute<UniqueIdentifierAttributeMetadata>("roletemplateid", AttributeTypeCode.Uniqueidentifier),
             CreateAttribute<StringAttributeMetadata>("name", AttributeTypeCode.String));
 
-        // Intersect entities for security role assignments
+        // Intersect entities for security role assignments.
+        // The intersect columns must be Uniqueidentifier, not Lookup: XrmMockup writes and
+        // reads them as raw Guids (AssociateRequestHandler, DisassociateRequestHandler,
+        // Core's N:N traversal all use GetColumn<Guid>). A Lookup column only accepts a
+        // DbRow, so a Guid write is silently dropped and the next read NREs on unboxing null
+        // — which surfaces as a crash when assigning a user their second role.
         EnsureEntity(skeleton, "systemuserroles", OwnershipTypes.None,
             CreateAttribute<UniqueIdentifierAttributeMetadata>("systemuserrolesid", AttributeTypeCode.Uniqueidentifier),
-            CreateAttribute<LookupAttributeMetadata>("systemuserid", AttributeTypeCode.Lookup),
-            CreateAttribute<LookupAttributeMetadata>("roleid", AttributeTypeCode.Lookup));
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("systemuserid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("roleid", AttributeTypeCode.Uniqueidentifier));
 
         EnsureEntity(skeleton, "teamroles", OwnershipTypes.None,
             CreateAttribute<UniqueIdentifierAttributeMetadata>("teamrolesid", AttributeTypeCode.Uniqueidentifier),
-            CreateAttribute<LookupAttributeMetadata>("teamid", AttributeTypeCode.Lookup),
-            CreateAttribute<LookupAttributeMetadata>("roleid", AttributeTypeCode.Lookup));
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("teamid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("roleid", AttributeTypeCode.Uniqueidentifier));
 
         // Principal object access for sharing
         EnsureEntity(skeleton, "principalobjectaccess", OwnershipTypes.None,
@@ -361,6 +418,31 @@ public static class MetadataFolderBuilder
                     CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.Entity1IntersectAttribute, AttributeTypeCode.Uniqueidentifier),
                     CreateAttribute<UniqueIdentifierAttributeMetadata>(rel.Entity2IntersectAttribute, AttributeTypeCode.Uniqueidentifier));
             }
+        }
+    }
+
+    /// <summary>
+    /// Guarantees every entity has non-null OneToMany / ManyToOne / ManyToMany collections.
+    ///
+    /// Synthesized entities (intersect tables, system stubs) are built attribute-by-attribute and
+    /// never get relationship collections, and a solution export can omit them too. XrmMockup reads
+    /// them unguarded — cascading an owner change walks the owner's 1:N relationships and calls
+    /// FirstOrDefault on the related entity's collections — so a single null there surfaces as an
+    /// opaque ArgumentNullException("source") from deep inside LINQ, with nothing naming the entity.
+    /// Empty is the honest value: the entity genuinely has no relationships we know about.
+    /// </summary>
+    private static void EnsureRelationshipCollections(MetadataSkeleton skeleton)
+    {
+        if (skeleton.EntityMetadata == null) return;
+
+        foreach (var entity in skeleton.EntityMetadata.Values)
+        {
+            if (entity.OneToManyRelationships == null)
+                SetMetadataProperty(entity, "OneToManyRelationships", Array.Empty<OneToManyRelationshipMetadata>());
+            if (entity.ManyToOneRelationships == null)
+                SetMetadataProperty(entity, "ManyToOneRelationships", Array.Empty<OneToManyRelationshipMetadata>());
+            if (entity.ManyToManyRelationships == null)
+                SetMetadataProperty(entity, "ManyToManyRelationships", Array.Empty<ManyToManyRelationshipMetadata>());
         }
     }
 
@@ -571,7 +653,8 @@ public static class MetadataFolderBuilder
     /// in multiple solutions only gets copied once. XrmMockup's Security ctor does
     /// ToDictionary(s => s.RoleId) and crashes if the same GUID appears twice.
     /// </summary>
-    private static void CopySecurityRoleFiles(string sourceDir, string destDir, HashSet<Guid> seenRoleIds)
+    private static void CopySecurityRoleFiles(
+        string sourceDir, string destDir, HashSet<Guid> seenRoleIds, bool includeRolePrivileges)
     {
         if (!Directory.Exists(sourceDir)) return;
 
@@ -579,10 +662,11 @@ public static class MetadataFolderBuilder
         foreach (var file in Directory.GetFiles(sourceDir, "*.xml"))
         {
             Guid roleId;
+            SecurityRole role;
             try
             {
                 using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
-                var role = (SecurityRole)roleSerializer.ReadObject(stream)!;
+                role = (SecurityRole)roleSerializer.ReadObject(stream)!;
                 roleId = role.RoleId;
             }
             catch
@@ -601,7 +685,16 @@ public static class MetadataFolderBuilder
             if (File.Exists(destFile))
                 destFile = Path.Combine(destDir, roleId.ToString("N") + ".xml");
 
-            File.Copy(file, destFile);
+            if (includeRolePrivileges)
+            {
+                File.Copy(file, destFile);
+            }
+            else
+            {
+                role.Privileges = [];
+                using var outStream = new FileStream(destFile, FileMode.Create, FileAccess.Write);
+                roleSerializer.WriteObject(outStream, role);
+            }
         }
     }
 
