@@ -19,5 +19,13 @@ public record DataImportDefinition
     /// </summary>
     public Dictionary<string, string>? FieldTypes { get; init; }
 
+    /// <summary>
+    /// Optional user to run this import's writes as (sets CallerId on the connection for the
+    /// duration of this file only). Accepts a systemuser GUID or an exact fullname.
+    /// Use when the target entity's plugins must execute under a specific user's context — e.g. a
+    /// virtual-table / Dynamics BFF call that authorizes against the caller's MIA permission.
+    /// </summary>
+    public string? Impersonate { get; init; }
+
     public required List<Dictionary<string, JsonElement?>> Rows { get; init; }
 }

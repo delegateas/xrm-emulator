@@ -2591,6 +2591,28 @@ public static class CommitPipeline
                     {
                         var def = (DataImportDefinition)item.ParsedData;
                         log?.Invoke($"Importing {def.Rows.Count} row(s) into {def.Table} (match on: {string.Join("+", def.MatchOn)})");
+
+                        // Optional per-file impersonation: run this import's writes as a specific user
+                        // (CallerId) so target plugins execute under that user's context — e.g. a
+                        // virtual-table / BFF call authorized against the caller's MIA permission.
+                        // client is typed IOrganizationService, so set CallerId reflectively (it is a
+                        // ServiceClient underneath). Restored in finally so it never leaks to other items.
+                        var callerProp = client.GetType().GetProperty("CallerId");
+                        object? originalCaller = null;
+                        var impersonating = false;
+                        if (!string.IsNullOrWhiteSpace(def.Impersonate))
+                        {
+                            if (callerProp == null)
+                                throw new InvalidOperationException(
+                                    $"Import requests impersonation ('{def.Impersonate}') but the connection type " +
+                                    $"'{client.GetType().Name}' has no CallerId property.");
+                            var callerId = ResolveImpersonationUserId(client, def.Impersonate!);
+                            originalCaller = callerProp.GetValue(client);
+                            callerProp.SetValue(client, callerId);
+                            impersonating = true;
+                            log?.Invoke($"  Impersonating '{def.Impersonate}' ({callerId}) for this import.");
+                        }
+
                         var created = 0;
                         var updated = 0;
                         var rowIndex = 0;
@@ -2598,6 +2620,8 @@ public static class CommitPipeline
                         var lookupCache = new Dictionary<string, EntityReference>(StringComparer.Ordinal);
                         // Keyed by matchOn value(s) → record GUID, written to _outputs.json after the loop
                         var rowOutputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        try
+                        {
                         foreach (var row in def.Rows)
                         {
                             rowIndex++;
@@ -2625,6 +2649,12 @@ public static class CommitPipeline
                                 throw new InvalidOperationException(
                                     $"Row {rowIndex} [{rowLabel}]: {rowEx.Message}", rowEx);
                             }
+                        }
+                        }
+                        finally
+                        {
+                            if (impersonating)
+                                callerProp!.SetValue(client, originalCaller ?? Guid.Empty);
                         }
                         log?.Invoke($"  Import complete: {created} created, {updated} updated.");
                         resolvedOutputs[relativePath] = rowOutputs;
@@ -3106,6 +3136,25 @@ public static class CommitPipeline
 
         return parts[0] + "_" + string.Concat(parts.Skip(1).Select(p =>
             p.Length > 0 ? char.ToUpperInvariant(p[0]) + p[1..] : p));
+    }
+
+    /// <summary>
+    /// Resolve an impersonation target (systemuser GUID or exact fullname) to a systemuser id.
+    /// </summary>
+    private static Guid ResolveImpersonationUserId(IOrganizationService client, string userRef)
+    {
+        if (Guid.TryParse(userRef, out var id))
+            return id;
+
+        var query = new QueryExpression("systemuser")
+        {
+            ColumnSet = new ColumnSet(false),
+            TopCount = 1,
+            Criteria = { Conditions = { new ConditionExpression("fullname", ConditionOperator.Equal, userRef) } },
+        };
+        var user = client.RetrieveMultiple(query).Entities.FirstOrDefault()
+            ?? throw new InvalidOperationException($"Impersonation user not found (fullname='{userRef}'). Use the systemuser GUID or exact fullname.");
+        return user.Id;
     }
 
     private static void ScanSavedQueriesInDir(string rootDir, string entityFolderName,

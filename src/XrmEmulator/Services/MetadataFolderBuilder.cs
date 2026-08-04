@@ -294,6 +294,39 @@ public static class MetadataFolderBuilder
             CreateAttribute<StateAttributeMetadata>("statecode", AttributeTypeCode.State),
             CreateAttribute<StatusAttributeMetadata>("statuscode", AttributeTypeCode.Status));
 
+        // activitypointer — the base table every activity row is mirrored into. XrmMockup writes a
+        // pointer row on Create and Update of any entity whose metadata has IsActivity set
+        // (kf_booking, phonecall, task, appointment, …), so creating one fails outright when the
+        // entity is missing. Solution exports never contain it. Attributes mirror exactly what
+        // XrmMockup copies across; PrimaryIdAttribute is activityid, not the derived default.
+        EnsureEntity(skeleton, "activitypointer", OwnershipTypes.UserOwned, "subject",
+            CreateAttribute<UniqueIdentifierAttributeMetadata>("activityid", AttributeTypeCode.Uniqueidentifier),
+            CreateAttribute<StringAttributeMetadata>("subject", AttributeTypeCode.String),
+            CreateAttribute<MemoAttributeMetadata>("description", AttributeTypeCode.Memo),
+            CreateAttribute<PicklistAttributeMetadata>("activitytypecode", AttributeTypeCode.Picklist),
+            CreateAttribute<PicklistAttributeMetadata>("prioritycode", AttributeTypeCode.Picklist),
+            CreateAttribute<PicklistAttributeMetadata>("deliveryprioritycode", AttributeTypeCode.Picklist),
+            CreateAttribute<LookupAttributeMetadata>("ownerid", AttributeTypeCode.Owner),
+            CreateAttribute<LookupAttributeMetadata>("owningbusinessunit", AttributeTypeCode.Lookup),
+            CreateAttribute<LookupAttributeMetadata>("owninguser", AttributeTypeCode.Lookup),
+            CreateAttribute<LookupAttributeMetadata>("owningteam", AttributeTypeCode.Lookup),
+            CreateAttribute<LookupAttributeMetadata>("regardingobjectid", AttributeTypeCode.Lookup),
+            CreateAttribute<IntegerAttributeMetadata>("actualdurationminutes", AttributeTypeCode.Integer),
+            CreateAttribute<IntegerAttributeMetadata>("scheduleddurationminutes", AttributeTypeCode.Integer),
+            CreateAttribute<DateTimeAttributeMetadata>("actualstart", AttributeTypeCode.DateTime),
+            CreateAttribute<DateTimeAttributeMetadata>("actualend", AttributeTypeCode.DateTime),
+            CreateAttribute<DateTimeAttributeMetadata>("scheduledstart", AttributeTypeCode.DateTime),
+            CreateAttribute<DateTimeAttributeMetadata>("scheduledend", AttributeTypeCode.DateTime),
+            CreateAttribute<DateTimeAttributeMetadata>("senton", AttributeTypeCode.DateTime),
+            CreateAttribute<BooleanAttributeMetadata>("isbilled", AttributeTypeCode.Boolean),
+            CreateAttribute<BooleanAttributeMetadata>("isregularactivity", AttributeTypeCode.Boolean),
+            CreateAttribute<BooleanAttributeMetadata>("isworkflowcreated", AttributeTypeCode.Boolean),
+            CreateAttribute<StateAttributeMetadata>("statecode", AttributeTypeCode.State),
+            CreateActivityStatusAttribute());
+
+        if (skeleton.EntityMetadata.TryGetValue("activitypointer", out var activityPointer))
+            SetMetadataProperty(activityPointer, "PrimaryIdAttribute", "activityid");
+
         // Ensure BaseOrganization entity exists
         if (skeleton.BaseOrganization == null || skeleton.BaseOrganization.Attributes.Count == 0)
         {
@@ -368,6 +401,23 @@ public static class MetadataFolderBuilder
         {
             skeleton.DefaultStateStatus[logicalName] = new Dictionary<int, int> { { 0, 1 } };
         }
+    }
+
+    /// <summary>
+    /// activitypointer's statuscode needs real options, unlike the other stubs. Every mirrored
+    /// activity row arrives with an explicit statuscode, and XrmMockup then validates it by looking
+    /// up the matching option's State — a statuscode attribute with no OptionSet throws there.
+    /// States 0-3 map to status reasons 1-4, the same mapping XrmMockup applies when it builds the
+    /// pointer row.
+    /// </summary>
+    private static StatusAttributeMetadata CreateActivityStatusAttribute()
+    {
+        var attr = CreateAttribute<StatusAttributeMetadata>("statuscode", AttributeTypeCode.Status);
+        var optionSet = new OptionSetMetadata();
+        for (var state = 0; state <= 3; state++)
+            optionSet.Options.Add(new StatusOptionMetadata { Value = state + 1, State = state });
+        SetMetadataProperty(attr, "OptionSet", optionSet);
+        return attr;
     }
 
     private static T CreateAttribute<T>(string logicalName, AttributeTypeCode typeCode) where T : AttributeMetadata, new()
