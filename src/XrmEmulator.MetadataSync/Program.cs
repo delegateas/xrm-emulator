@@ -83,7 +83,13 @@ try
     var noCache = HasFlag(args, "--no-cache");
     var debug = HasFlag(args, "--debug");
 
-    if (HasFlag(args, "--help") || HasFlag(args, "-h"))
+    // Commands listed here print their own help; everything else falls back to the global help.
+    // Kept as an allowlist on purpose: routing --help to a handler that ignores it would run the
+    // real operation instead (e.g. `commit --help` would commit).
+    var ownsHelp = positionalArgs.Length > 0
+        && positionalArgs[0].Equals("promote", StringComparison.OrdinalIgnoreCase);
+
+    if ((HasFlag(args, "--help") || HasFlag(args, "-h")) && !ownsHelp)
     {
         PrintHelp();
         return;
@@ -230,6 +236,10 @@ try
         && positionalArgs[1].Equals("copy-components", StringComparison.OrdinalIgnoreCase))
     {
         await HandleSolutionCopyComponentsCommand(positionalArgs, args, configuration, noCache);
+    }
+    else if (positionalArgs.Length >= 1 && positionalArgs[0].Equals("promote", StringComparison.OrdinalIgnoreCase))
+    {
+        await HandlePromoteCommand(args);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("sla", StringComparison.OrdinalIgnoreCase))
     {
@@ -2178,6 +2188,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]pcf push[/] <project-path> [[--prefix kf]]              Build, validate and stage a PCF control for commit");
     AnsiConsole.MarkupLine("  [bold]solution import[/] <zip> [[--skip-product-update-deps]]  Import a solution zip, optionally ignoring first-party package deps");
     AnsiConsole.MarkupLine("  [bold]solution remove-component[/] --type <t> --id <guid>  Remove a component from the solution (does NOT delete it)");
+    AnsiConsole.MarkupLine("  [bold]promote[/] [[--managed]] [[--no-overwrite]] [[--out <dir>]]         Export a solution from one environment and import it into another (interactive, no env folder)");
     AnsiConsole.MarkupLine("  [bold]plugin register|update|remove|sign[/] ...             Plug-in lifecycle (last is Authenticode sign)");
     AnsiConsole.MarkupLine("  [bold]plugin attach-mi[/] <asm> --client-id <id> --tenant <id>  Bind plug-in assembly to a UAMI for KV access");
     AnsiConsole.MarkupLine("  [bold]plugin step enable|disable[/] <step-id>               Toggle a plugin step on/off (e.g. temporarily lift a guard)");
@@ -4049,7 +4060,9 @@ static async Task HandleSolutionImportCommand(string[] positionalArgs, string[] 
         AnsiConsole.MarkupLine("[red]Usage:[/] solution import <zip-path> [[--skip-product-update-deps]] [[--overwrite]] [[--publish-workflows]]");
         AnsiConsole.MarkupLine("[grey]  --skip-product-update-deps   Ignore unresolvable first-party package dependencies (canResolveMissingDependency=True)[/]");
         AnsiConsole.MarkupLine("[grey]  --overwrite                  Overwrite unmanaged customizations[/]");
-        AnsiConsole.MarkupLine("[grey]  --publish-workflows          Activate workflows after import[/]");
+        AnsiConsole.MarkupLine("[grey]  --publish-workflows          Activate workflows AND enable plug-in steps after import.[/]");
+        AnsiConsole.MarkupLine("[grey]                               The maker portal has this on by default; here it is off, so[/]");
+        AnsiConsole.MarkupLine("[grey]                               without it every step in the solution lands disabled.[/]");
         Environment.Exit(1);
         return;
     }
@@ -4124,6 +4137,539 @@ static async Task HandleSolutionImportCommand(string[] positionalArgs, string[] 
         AnsiConsole.MarkupLine($"[red]Import failed:[/] {ex.Message}");
         Environment.Exit(1);
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// promote — export a solution from one environment and import it into another
+//
+// Deliberately standalone: it signs in from scratch, picks both environments and the
+// solution interactively, and never reads a .metadatasync/ folder or its credentials.
+// Do not call FindConnectionMetadata() from here — it walks up and peeks into
+// subdirectories, so it would latch onto an env folder when run from a repo root.
+// ──────────────────────────────────────────────────────────────
+static async Task HandlePromoteCommand(string[] allArgs)
+{
+    if (HasFlag(allArgs, "--help") || HasFlag(allArgs, "-h"))
+    {
+        AnsiConsole.MarkupLine("[bold]promote[/] — export a solution from one environment and import it into another");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Usage:[/]");
+        AnsiConsole.MarkupLine("  promote [[--managed]] [[--no-overwrite]] [[--no-publish-workflows]] [[--version <v>]]");
+        AnsiConsole.MarkupLine("          [[--no-version-bump]] [[--skip-product-update-deps]] [[--out <dir>]] [[--no-cache]]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Fully interactive: signs in, lists your Dataverse environments, and asks you to pick a[/]");
+        AnsiConsole.MarkupLine("[grey]source environment, a target environment and a solution. Does the same thing as an[/]");
+        AnsiConsole.MarkupLine("[grey]export/import round-trip in the maker portal, so the target receives the source's exact[/]");
+        AnsiConsole.MarkupLine("[grey]assembly bytes and plug-in step registrations.[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]Runs from any directory and needs no environment folder — it does not read or reuse[/]");
+        AnsiConsole.MarkupLine("[grey]any existing connection metadata. Nothing is written to the target until you confirm.[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Options:[/]");
+        AnsiConsole.MarkupLine("  --managed                    Export/import as managed (default: unmanaged)");
+        AnsiConsole.MarkupLine("  --no-overwrite               Keep the target's unmanaged customizations instead of overwriting them");
+        AnsiConsole.MarkupLine("  --no-publish-workflows       Leave processes and plug-in steps deactivated (they land disabled)");
+        AnsiConsole.MarkupLine("  --version <v>                Export as this version, e.g. 1.0.0.119 (skips the version prompt)");
+        AnsiConsole.MarkupLine("  --no-version-bump            Export the source's stored version as-is, without bumping it");
+        AnsiConsole.MarkupLine("  --skip-product-update-deps   Ignore unresolvable first-party package dependencies");
+        AnsiConsole.MarkupLine("  --out <dir>                  Where to write the exported zip (default: ~/.xrm-emulator/promote)");
+        AnsiConsole.MarkupLine("  --no-cache                   Force a fresh sign-in instead of a silent token refresh");
+        Environment.Exit(0);
+        return;
+    }
+
+    var managed              = HasFlag(allArgs, "--managed");
+    var overwrite            = !HasFlag(allArgs, "--no-overwrite");
+    // On by default, matching the maker portal's import wizard, where "Enable any SDK message
+    // processing steps included in the solution" is pre-checked. Despite its name PublishWorkflows
+    // is what enables plug-in steps — with it off, every step in the solution lands disabled in the
+    // target, which is the opposite of what a promote is for.
+    var publishWorkflows     = !HasFlag(allArgs, "--no-publish-workflows");
+    var skipProductUpdateDeps = HasFlag(allArgs, "--skip-product-update-deps");
+    var noVersionBump        = HasFlag(allArgs, "--no-version-bump");
+    var explicitVersion      = ParseNamedArg(allArgs, "--version");
+    var outDir = ParseNamedArg(allArgs, "--out")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".xrm-emulator", "promote");
+
+    if (explicitVersion != null && !IsFourPartVersion(explicitVersion))
+    {
+        AnsiConsole.MarkupLine($"[red]--version must be a four-part version, e.g. 1.0.0.119 — got:[/] {Markup.Escape(explicitVersion)}");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (explicitVersion != null && noVersionBump)
+    {
+        AnsiConsole.MarkupLine("[red]--version and --no-version-bump contradict each other.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    AnsiConsole.Write(new Rule("[bold blue]Promote solution[/]").LeftJustified());
+    AnsiConsole.WriteLine();
+
+    // 1. Sign in once — the refresh token backs both environments (TokenCache is keyed per URL).
+    var discovery = await ConnectionWizard.DiscoverEnvironmentsAsync(null, HasFlag(allArgs, "--no-cache"));
+
+    // 2+3. Pick source, then target with the source filtered out.
+    var sourceEnv = ConnectionWizard.PickEnvironment(discovery,
+        $"Select the [green]source[/] environment to export [grey]from[/] ({discovery.Environments.Count} found):");
+    var targetEnv = ConnectionWizard.PickEnvironment(discovery,
+        "Select the [yellow]target[/] environment to import [grey]into[/]:", exclude: sourceEnv);
+
+    // 4. Connect to the source and pick the solution.
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[grey]Connecting to source [/][bold]{Markup.Escape(sourceEnv.FriendlyName)}[/][grey]...[/]");
+    using var sourceClient = await ConnectionFactory.CreateAsync(ConnectionWizard.ToConnectionSettings(discovery, sourceEnv));
+
+    var (_, solutionName) = SolutionPicker.Run(sourceClient);
+
+    var sourceSolution = PromoteReports.GetSolution(sourceClient, solutionName)
+        ?? throw new InvalidOperationException($"Solution '{solutionName}' disappeared from the source environment.");
+
+    if (sourceSolution.IsManaged)
+    {
+        AnsiConsole.MarkupLine($"[red]'{Markup.Escape(solutionName)}' is managed in the source environment.[/]");
+        AnsiConsole.MarkupLine("[grey]Exporting a managed solution re-exports the layer as installed, which is almost never what[/]");
+        AnsiConsole.MarkupLine("[grey]you want to promote. Pick the unmanaged solution in the environment where it is authored.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    // 5. Connect to the target and pre-flight.
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[grey]Connecting to target [/][bold]{Markup.Escape(targetEnv.FriendlyName)}[/][grey]...[/]");
+    using var targetClient = await ConnectionFactory.CreateAsync(ConnectionWizard.ToConnectionSettings(discovery, targetEnv));
+
+    var targetSolution = PromoteReports.GetSolution(targetClient, solutionName);
+
+    if (targetSolution != null && targetSolution.IsManaged != managed)
+    {
+        AnsiConsole.MarkupLine(targetSolution.IsManaged
+            ? $"[red]'{Markup.Escape(solutionName)}' is installed as managed in the target — importing it unmanaged is not supported.[/]"
+            : $"[red]'{Markup.Escape(solutionName)}' is unmanaged in the target — converting it to managed is a one-way door and is not done here.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (targetSolution != null
+        && Version.TryParse(sourceSolution.Version, out var sourceVersion)
+        && Version.TryParse(targetSolution.Version, out var targetVersion)
+        && targetVersion > sourceVersion)
+    {
+        AnsiConsole.MarkupLine($"[red]The target is ahead of the source:[/] {targetSolution.Version} > {sourceSolution.Version}.");
+        AnsiConsole.MarkupLine("[grey]That means someone authored in the target, so importing would roll their work back —[/]");
+        AnsiConsole.MarkupLine("[grey]raising the version with [/]--version[grey] would hide that, not fix it. Find out what changed in[/]");
+        AnsiConsole.MarkupLine("[grey]the target first, or promote the other way.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    AnsiConsole.MarkupLine("[grey]Reading solution components...[/]");
+    var sourceComponentIds = PromoteReports.GetSolutionComponentIds(sourceClient, sourceSolution.SolutionId);
+
+    // A solution export writes pluginassembly.managedidentityid as a hard GUID, but the
+    // managedidentity row itself is not a solution component — it must pre-exist in the target.
+    var miBindings = PromoteReports.GetManagedIdentityBindings(sourceClient, sourceComponentIds);
+    var missingMi = miBindings
+        .Where(b => !PromoteReports.ManagedIdentityExists(targetClient, b.ManagedIdentityId))
+        .ToList();
+
+    if (missingMi.Count > 0)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[red]The target is missing managed-identity rows the import needs:[/]");
+        foreach (var b in missingMi)
+            AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(b.AssemblyName)} → {b.ManagedIdentityId}");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]The import would fail with [/]\"Entity 'managedidentity' With Id = … Does Not Exist\"[grey].[/]");
+        AnsiConsole.MarkupLine("[grey]Create the row in the target first — from the target's solution folder, run:[/]");
+        foreach (var b in missingMi)
+        {
+            AnsiConsole.MarkupLine($"  [blue]plugin attach-mi[/] {Markup.Escape(b.AssemblyName)} --client-id <target UAMI client id> \\");
+            AnsiConsole.MarkupLine($"    --tenant <target tenant id> --managed-identity-id {b.ManagedIdentityId}");
+        }
+        AnsiConsole.MarkupLine("  [blue]commit[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Snapshot the target's environment-variable values so the post-import report can say
+    // which of them the import replaced.
+    var targetComponentIdsBefore = targetSolution != null
+        ? PromoteReports.GetSolutionComponentIds(targetClient, targetSolution.SolutionId)
+        : [];
+    var targetEnvVarsBefore = targetComponentIdsBefore.Count > 0
+        ? PromoteReports.GetEnvironmentVariables(targetClient, targetComponentIdsBefore)
+        : [];
+
+    // 6. Version. ExportSolutionRequest never touches the solution record, so the zip carries
+    // whatever version is stored. The maker portal's export dialog bumps the last segment and
+    // writes it back before exporting — mirror that, or the version stops moving the moment
+    // exports go through this command instead of the portal.
+    var exportVersion = sourceSolution.Version;
+    if (!noVersionBump)
+    {
+        var suggested = explicitVersion ?? BumpSolutionVersion(sourceSolution.Version);
+        exportVersion = explicitVersion ?? AnsiConsole.Prompt(
+            new TextPrompt<string>($"Version to export [grey](current {sourceSolution.Version})[/]:")
+                .DefaultValue(suggested)
+                .ShowDefaultValue()
+                .Validate(v => IsFourPartVersion(v)
+                    ? Spectre.Console.ValidationResult.Success()
+                    : Spectre.Console.ValidationResult.Error("[red]Must be a four-part version, e.g. 1.0.0.119[/]")));
+    }
+
+    if (targetSolution != null
+        && Version.TryParse(exportVersion, out var exportVer)
+        && Version.TryParse(targetSolution.Version, out var targetVer2)
+        && exportVer <= targetVer2)
+    {
+        AnsiConsole.MarkupLine($"[yellow]The target is already on {targetSolution.Version}[/] and this exports {exportVersion}.");
+        if (managed)
+        {
+            AnsiConsole.MarkupLine("[red]A managed import needs a higher version than the target's — raise it and try again.[/]");
+            Environment.Exit(1);
+            return;
+        }
+        AnsiConsole.MarkupLine("[grey]An unmanaged import accepts this, but afterwards the version no longer tells you[/]");
+        AnsiConsole.MarkupLine("[grey]whether the target is current. Consider a higher version.[/]");
+    }
+
+    // 7. Confirmation — nothing has been written to either environment up to this point.
+    var table = new Table().Border(TableBorder.Rounded);
+    table.AddColumn("");
+    table.AddColumn("Source");
+    table.AddColumn("Target");
+    table.AddRow("Environment", Markup.Escape(sourceEnv.FriendlyName), $"[yellow]{Markup.Escape(targetEnv.FriendlyName)}[/]");
+    table.AddRow("URL", sourceEnv.Url, targetEnv.Url);
+    table.AddRow("Solution", Markup.Escape(solutionName), Markup.Escape(solutionName));
+    table.AddRow("Version",
+        exportVersion == sourceSolution.Version
+            ? sourceSolution.Version
+            : $"{sourceSolution.Version} → [yellow]{exportVersion}[/]",
+        targetSolution?.Version ?? "[grey]not installed — will be created[/]");
+    table.AddRow("Type", managed ? "managed" : "unmanaged", managed ? "managed" : "unmanaged");
+    table.AddRow("Overwrite unmanaged customizations", "", overwrite ? "[yellow]yes[/]" : "no");
+    table.AddRow("Activate processes / plug-in steps", "", publishWorkflows ? "yes" : "[yellow]no — steps land disabled[/]");
+    table.AddRow("Managed identities to resolve", miBindings.Count.ToString(), "[green]all present[/]");
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.Write(table);
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine($"[yellow]This writes to {Markup.Escape(targetEnv.FriendlyName)}.[/] Rows that exist only in the target are never deleted by an import.");
+    if (exportVersion != sourceSolution.Version)
+        AnsiConsole.MarkupLine($"[grey]The solution version in {Markup.Escape(sourceEnv.FriendlyName)} is also updated to {exportVersion}, as a portal export would.[/]");
+    AnsiConsole.WriteLine();
+
+    var typed = AnsiConsole.Prompt(
+        new TextPrompt<string>($"Type the target environment name [grey]({Markup.Escape(targetEnv.FriendlyName)})[/] to continue, or press [yellow]Enter[/] to abort:")
+            .AllowEmpty());
+
+    if (!string.Equals(typed.Trim(), targetEnv.FriendlyName.Trim(), StringComparison.OrdinalIgnoreCase))
+    {
+        AnsiConsole.MarkupLine("[grey]Aborted — nothing was written to the target.[/]");
+        return;
+    }
+
+    // 8. Bump the source's version first, so the exported zip carries it.
+    if (exportVersion != sourceSolution.Version)
+    {
+        sourceClient.Update(new Entity("solution", sourceSolution.SolutionId) { ["version"] = exportVersion });
+        AnsiConsole.MarkupLine($"[green]Version in {Markup.Escape(sourceEnv.FriendlyName)}:[/] {sourceSolution.Version} → {exportVersion}");
+    }
+
+    // 9. Export to a zip outside any environment folder.
+    Directory.CreateDirectory(outDir);
+    var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+    var zipName = $"{solutionName}-{exportVersion}-{stamp}{(managed ? "_managed" : "")}.zip";
+    var zipPath = Path.Combine(outDir, zipName);
+
+    AnsiConsole.WriteLine();
+    long zipSize = 0;
+    await AnsiConsole.Status().StartAsync($"Exporting {solutionName} {exportVersion} from {sourceEnv.FriendlyName}...", async _ =>
+    {
+        zipSize = await Task.Run(() => SolutionExporter.ExportZip(sourceClient, solutionName, managed, zipPath));
+    });
+    AnsiConsole.MarkupLine($"[green]Exported[/] {zipSize / 1024} KB → [grey]{Markup.Escape(zipPath)}[/]");
+
+    // 10. Async import with progress polling. Async because a large solution's synchronous import
+    // gives no progress and can outlive the request timeout.
+    var importJobId = Guid.NewGuid();
+    var importRequest = new ImportSolutionAsyncRequest
+    {
+        CustomizationFile                = File.ReadAllBytes(zipPath),
+        OverwriteUnmanagedCustomizations = overwrite,
+        PublishWorkflows                 = publishWorkflows,
+        SkipProductUpdateDependencies    = skipProductUpdateDeps,
+        ImportJobId                      = importJobId,
+    };
+
+    Guid asyncOperationId;
+    try
+    {
+        // Depending on the transport the client may hand back a plain OrganizationResponse
+        // rather than the typed one, so read the id out of Results as a fallback.
+        var response = targetClient.Execute(importRequest);
+        asyncOperationId = response switch
+        {
+            ImportSolutionAsyncResponse asyncResponse => asyncResponse.AsyncOperationId,
+            _ when response.Results.TryGetValue("AsyncOperationId", out var raw) && raw is Guid id => id,
+            _ => throw new InvalidOperationException(
+                "The import was accepted but the environment returned no AsyncOperationId to track it with.")
+        };
+    }
+    catch (Exception ex)
+    {
+        ReportImportFailure(targetClient, importJobId, ex, zipPath);
+        return;
+    }
+
+    AnsiConsole.MarkupLine($"[grey]Import job {importJobId} queued as async operation {asyncOperationId}.[/]");
+
+    var failureMessage = await PollImportAsync(targetClient, asyncOperationId, importJobId);
+    if (failureMessage != null)
+    {
+        ReportImportFailure(targetClient, importJobId, new InvalidOperationException(failureMessage), zipPath);
+        return;
+    }
+
+    AnsiConsole.MarkupLine("[green]Import succeeded.[/]");
+
+    // 11. Publish, so forms, views, sitemaps and web resources take effect.
+    AnsiConsole.Status().Start("Publishing all customizations...", _ => targetClient.Execute(new PublishAllXmlRequest()));
+    AnsiConsole.MarkupLine("[green]Published.[/]");
+
+    // 12. Post-import report — findings only, no automatic fixes.
+    PrintPromoteReport(targetClient, sourceClient, solutionName, sourceEnv, targetEnv, targetEnvVarsBefore);
+}
+
+/// <summary>
+/// Polls the async operation until it settles. Returns null on success, or a failure message.
+/// </summary>
+static async Task<string?> PollImportAsync(IOrganizationService client, Guid asyncOperationId, Guid importJobId)
+{
+    string? failure = null;
+
+    await AnsiConsole.Progress()
+        .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new ElapsedTimeColumn(), new SpinnerColumn())
+        .StartAsync(async ctx =>
+        {
+            var task = ctx.AddTask("[green]Importing[/]", maxValue: 100);
+
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5));
+
+                // importjob.progress lags the async operation slightly and the row may not exist yet.
+                try
+                {
+                    var job = client.Retrieve("importjob", importJobId, new Microsoft.Xrm.Sdk.Query.ColumnSet("progress"));
+                    var progress = job.GetAttributeValue<double?>("progress");
+                    if (progress.HasValue)
+                        task.Value = Math.Clamp(progress.Value, 0, 100);
+                }
+                catch { /* job row not created yet */ }
+
+                var op = client.Retrieve("asyncoperation", asyncOperationId,
+                    new Microsoft.Xrm.Sdk.Query.ColumnSet("statecode", "statuscode", "message", "friendlymessage"));
+
+                var state = op.GetAttributeValue<OptionSetValue>("statecode")?.Value;
+                if (state != 3) // 3 = Completed
+                    continue;
+
+                var status = op.GetAttributeValue<OptionSetValue>("statuscode")?.Value;
+                if (status == 30) // Succeeded
+                {
+                    task.Value = 100;
+                    return;
+                }
+
+                failure = op.GetAttributeValue<string>("friendlymessage")
+                    ?? op.GetAttributeValue<string>("message")
+                    ?? $"Async operation ended with status {status}.";
+                return;
+            }
+        });
+
+    return failure;
+}
+
+/// <summary>
+/// True only for a full major.minor.build.revision version. <c>Version.TryParse</c> alone accepts
+/// "1.2" and leaves the missing parts at -1, which Dataverse rejects.
+/// </summary>
+static bool IsFourPartVersion(string value) =>
+    Version.TryParse(value, out var v) && v.Build >= 0 && v.Revision >= 0;
+
+/// <summary>
+/// Increments the last segment of a solution version, the same way the maker portal's export
+/// dialog pre-fills it: 1.0.0.118 → 1.0.0.119. Falls back to appending a revision when the stored
+/// version has fewer than four parts, and returns the input unchanged if it cannot be parsed.
+/// </summary>
+static string BumpSolutionVersion(string current)
+{
+    if (!Version.TryParse(current, out var v))
+        return current;
+
+    var major    = v.Major;
+    var minor    = Math.Max(v.Minor, 0);
+    var build    = Math.Max(v.Build, 0);
+    var revision = Math.Max(v.Revision, 0);
+
+    return $"{major}.{minor}.{build}.{revision + 1}";
+}
+
+/// <summary>
+/// Prints the errors recorded on the import job, falling back to the raw exception. Keeps the
+/// zip path visible so the import can be retried with <c>solution import</c>.
+/// </summary>
+static void ReportImportFailure(IOrganizationService client, Guid importJobId, Exception ex, string zipPath)
+{
+    try
+    {
+        var job = client.Retrieve("importjob", importJobId,
+            new Microsoft.Xrm.Sdk.Query.ColumnSet("progress", "data", "completedon"));
+        var data = job.GetAttributeValue<string>("data");
+        if (!string.IsNullOrEmpty(data))
+        {
+            var doc = XDocument.Parse(data);
+            var errors = doc.Descendants("result")
+                .Where(r => r.Attribute("result")?.Value == "failure")
+                .Select(r => r.Attribute("errortext")?.Value)
+                .Where(e => !string.IsNullOrEmpty(e))
+                .Distinct()
+                .ToList();
+            if (errors.Count > 0)
+            {
+                AnsiConsole.MarkupLine("[red]Import failed. Errors from import job:[/]");
+                foreach (var err in errors)
+                    AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(err!)}");
+                AnsiConsole.MarkupLine($"[grey]Exported zip kept at {Markup.Escape(zipPath)} — retry with [/][blue]solution import[/][grey] once fixed.[/]");
+                Environment.Exit(1);
+                return;
+            }
+        }
+    }
+    catch { /* fall through to the generic error */ }
+
+    AnsiConsole.MarkupLine($"[red]Import failed:[/] {Markup.Escape(ex.Message)}");
+    AnsiConsole.MarkupLine($"[grey]Exported zip kept at {Markup.Escape(zipPath)}.[/]");
+    Environment.Exit(1);
+}
+
+/// <summary>
+/// Reports what the import carried across that is environment-specific. All of it also applies to
+/// an export/import done in the maker portal — the command surfaces it rather than fixing it.
+/// </summary>
+static void PrintPromoteReport(
+    IOrganizationService targetClient,
+    IOrganizationService sourceClient,
+    string solutionName,
+    DiscoveredEnvironment sourceEnv,
+    DiscoveredEnvironment targetEnv,
+    List<EnvVarState> targetEnvVarsBefore)
+{
+    AnsiConsole.WriteLine();
+    AnsiConsole.Write(new Rule($"[bold]Check in {Markup.Escape(targetEnv.FriendlyName)}[/]").LeftJustified());
+
+    var solution = PromoteReports.GetSolution(targetClient, solutionName);
+    if (solution == null)
+    {
+        AnsiConsole.MarkupLine("[yellow]Could not re-read the solution in the target — skipping the report.[/]");
+        return;
+    }
+
+    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(solutionName)} is now version [/][bold]{solution.Version}[/][grey] in {Markup.Escape(targetEnv.FriendlyName)}.[/]");
+    AnsiConsole.WriteLine();
+
+    var componentIds = PromoteReports.GetSolutionComponentIds(targetClient, solution.SolutionId);
+    var findings = 0;
+
+    // Connection references always arrive unbound; dependent cloud flows stay dormant.
+    var unbound = PromoteReports.GetUnboundConnectionReferences(targetClient, componentIds);
+    if (unbound.Count > 0)
+    {
+        findings++;
+        AnsiConsole.MarkupLine("[yellow]Connection references with no connection bound[/] — flows using them will not run:");
+        foreach (var cr in unbound)
+            AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(cr.DisplayName ?? cr.LogicalName)} [grey]({Markup.Escape(cr.LogicalName)})[/]");
+        AnsiConsole.MarkupLine("[grey]  Bind each one in the target, then turn the dependent flows on.[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    // Steps that arrived but are not running. With PublishWorkflows off this is every step in the
+    // solution; with it on, anything listed here was already disabled in the target or in the source.
+    var disabledSteps = PromoteReports.GetDisabledPluginSteps(targetClient, componentIds);
+    if (disabledSteps.Count > 0)
+    {
+        findings++;
+        AnsiConsole.MarkupLine($"[red]{disabledSteps.Count} plug-in step(s) in the solution are disabled[/] — that logic is not running:");
+        foreach (var s in disabledSteps.Take(20))
+        {
+            var scope = s.MessageName != null && s.PrimaryEntity is { Length: > 0 } and not "none"
+                ? $" [grey]({Markup.Escape(s.MessageName)} on {Markup.Escape(s.PrimaryEntity)})[/]"
+                : s.MessageName != null ? $" [grey]({Markup.Escape(s.MessageName)})[/]" : "";
+            AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(s.Name)}{scope}");
+        }
+        if (disabledSteps.Count > 20)
+            AnsiConsole.MarkupLine($"  [grey]… and {disabledSteps.Count - 20} more[/]");
+        AnsiConsole.MarkupLine("[grey]  Enable them with [/][blue]plugin step enable <step-id>[/][grey] + [/][blue]commit[/][grey] from the target's[/]");
+        AnsiConsole.MarkupLine("[grey]  solution folder, or re-run the promote without [/]--no-publish-workflows[grey].[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    var envVarsAfter = PromoteReports.GetEnvironmentVariables(targetClient, componentIds);
+    var beforeBySchema = targetEnvVarsBefore.ToDictionary(v => v.SchemaName, StringComparer.OrdinalIgnoreCase);
+
+    // No current value in the target means it now runs on whatever default the source shipped.
+    var onDefault = envVarsAfter.Where(v => v.UsesDefault && !string.IsNullOrEmpty(v.DefaultValue)).ToList();
+    if (onDefault.Count > 0)
+    {
+        findings++;
+        AnsiConsole.MarkupLine($"[yellow]Environment variables running on the default imported from {Markup.Escape(sourceEnv.FriendlyName)}[/]:");
+        foreach (var v in onDefault)
+            AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(v.SchemaName)} = {Markup.Escape(Truncate(v.DefaultValue!))}");
+        AnsiConsole.MarkupLine("[grey]  Set a target-specific current value for any of these that is environment-bound.[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    // Values the import replaced — compared against the snapshot taken before the import.
+    var replaced = envVarsAfter
+        .Where(v => v.CurrentValue != null
+                    && beforeBySchema.TryGetValue(v.SchemaName, out var before)
+                    && before.CurrentValue != null
+                    && before.CurrentValue != v.CurrentValue)
+        .ToList();
+    if (replaced.Count > 0)
+    {
+        findings++;
+        AnsiConsole.MarkupLine("[red]Environment variable values the import overwrote[/]:");
+        foreach (var v in replaced)
+        {
+            var before = beforeBySchema[v.SchemaName];
+            AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(v.SchemaName)}");
+            AnsiConsole.MarkupLine($"      was: {Markup.Escape(Truncate(before.CurrentValue!))}");
+            AnsiConsole.MarkupLine($"      now: {Markup.Escape(Truncate(v.CurrentValue!))}");
+        }
+        AnsiConsole.MarkupLine("[grey]  Restore the target's own values — Secret-typed ones point at that environment's key vault.[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    // Things no query can see.
+    AnsiConsole.MarkupLine("[grey]Not visible to this report:[/]");
+    AnsiConsole.MarkupLine("[grey]  • Environment-specific URLs hardcoded in form XML (IFRAME sources and the like) came across as-is.[/]");
+    AnsiConsole.MarkupLine("[grey]  • Which steps the target had deliberately disabled before the import — activation is[/]");
+    AnsiConsole.MarkupLine("[grey]    all-or-nothing, so a step that was intentionally off may now be on again.[/]");
+    AnsiConsole.MarkupLine("[grey]  • Any local metadata-sync snapshot of the target is now stale — re-sync it.[/]");
+
+    if (findings == 0)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[green]All steps enabled, no unbound connection references, no environment-variable drift.[/]");
+    }
+
+    static string Truncate(string value) => value.Length <= 80 ? value : value[..77] + "...";
 }
 
 // ──────────────────────────────────────────────────────────────

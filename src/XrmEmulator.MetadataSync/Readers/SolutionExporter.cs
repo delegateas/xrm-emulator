@@ -20,30 +20,7 @@ public static class SolutionExporter
         if (Directory.Exists(unpackDir))
             Directory.Delete(unpackDir, recursive: true);
 
-        // Export solution as unmanaged zip
-        var request = new ExportSolutionRequest
-        {
-            SolutionName = solutionUniqueName,
-            Managed = false
-        };
-
-        OrganizationResponse rawResponse;
-        try
-        {
-            rawResponse = service.Execute(request);
-        }
-        catch (Exception ex)
-        {
-            // Try to extract detailed error from HTTP response body
-            var detail = ExtractHttpResponseDetail(ex);
-            if (detail != null)
-                throw new InvalidOperationException(
-                    $"Solution export failed for '{solutionUniqueName}': {detail}", ex);
-            throw;
-        }
-
-        var response = (ExportSolutionResponse)rawResponse;
-        File.WriteAllBytes(zipPath, response.ExportSolutionFile);
+        ExportZip(service, solutionUniqueName, managed: false, zipPath);
 
         // Unpack using pac CLI via dnx
         var startInfo = new ProcessStartInfo
@@ -69,6 +46,45 @@ public static class SolutionExporter
             throw new InvalidOperationException(
                 $"pac solution unpack failed with exit code {process.ExitCode}: {output}");
         }
+    }
+
+    /// <summary>
+    /// Exports a solution to a zip file and nothing else — no unpack, no directory cleanup.
+    /// Used by callers that only need the transportable artifact (e.g. promoting a solution
+    /// from one environment to another).
+    /// </summary>
+    /// <returns>The size of the exported zip in bytes.</returns>
+    public static long ExportZip(IOrganizationService service, string solutionUniqueName, bool managed, string zipPath)
+    {
+        var directory = Path.GetDirectoryName(zipPath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+
+        var request = new ExportSolutionRequest
+        {
+            SolutionName = solutionUniqueName,
+            Managed = managed
+        };
+
+        OrganizationResponse rawResponse;
+        try
+        {
+            rawResponse = service.Execute(request);
+        }
+        catch (Exception ex)
+        {
+            // Try to extract detailed error from HTTP response body
+            var detail = ExtractHttpResponseDetail(ex);
+            if (detail != null)
+                throw new InvalidOperationException(
+                    $"Solution export failed for '{solutionUniqueName}': {detail}", ex);
+            throw;
+        }
+
+        var response = (ExportSolutionResponse)rawResponse;
+        File.WriteAllBytes(zipPath, response.ExportSolutionFile);
+
+        return response.ExportSolutionFile.LongLength;
     }
 
     /// <summary>

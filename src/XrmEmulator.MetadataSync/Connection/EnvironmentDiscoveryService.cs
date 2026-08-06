@@ -29,10 +29,14 @@ public static class EnvironmentDiscoveryService
 
     private const string DiscoveryCacheUrl = "https://discovery.global";
 
-    public static async Task<DiscoveryResult> DiscoverAsync(string clientId)
+    /// <param name="noCache">
+    /// Skip the cached discovery refresh token and force a browser sign-in. Defaults to false so
+    /// existing callers keep their silent-refresh behaviour.
+    /// </param>
+    public static async Task<DiscoveryResult> DiscoverAsync(string clientId, bool noCache = false)
     {
         // Step 1: Sign in to get ARM token + refresh token (try cache first)
-        var (armAccessToken, refreshToken) = await AuthenticateWithCacheAsync(clientId);
+        var (armAccessToken, refreshToken) = await AuthenticateWithCacheAsync(clientId, noCache);
         var tenants = await FetchTenantsAsync(armAccessToken);
 
         if (tenants.Count == 0)
@@ -118,9 +122,10 @@ public static class EnvironmentDiscoveryService
             clientId);
     }
 
-    private static async Task<(string AccessToken, string RefreshToken)> AuthenticateWithCacheAsync(string clientId)
+    private static async Task<(string AccessToken, string RefreshToken)> AuthenticateWithCacheAsync(
+        string clientId, bool noCache = false)
     {
-        var cached = TokenCache.Load(DiscoveryCacheUrl, clientId);
+        var cached = noCache ? null : TokenCache.Load(DiscoveryCacheUrl, clientId);
         if (cached != null)
         {
             AnsiConsole.MarkupLine("[grey]Found cached discovery credentials, attempting silent refresh...[/]");

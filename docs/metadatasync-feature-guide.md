@@ -12,6 +12,18 @@ Command (checkout/new/stage) → _pending/ file → user edits → commit → CR
 
 This gives users a chance to review, modify, and batch changes before pushing.
 
+### Documented exception: direct commands
+
+A small set of commands write to CRM without going through `_pending/`, because they author no
+components and therefore have no reviewable git artifact: `solution import <zip>` and `promote`.
+The commit pipeline also cannot host them — `CommitPipeline.ExecuteCommit` takes a single
+`IOrganizationService` and unconditionally re-exports into one `baseDir`, so a two-environment
+operation does not fit it.
+
+For these, the safeguard against a misclick is an **interactive confirmation**, not the pending
+queue. `promote` requires the target environment's friendly name to be typed out before it writes
+anything, and offers no `--yes`. Any future direct command must do the same.
+
 ## Architecture Overview
 
 ```
@@ -297,6 +309,8 @@ The commit flow is crash-resilient:
 
 ## Checklist for New Features
 
+For a pending-flow component type (the normal case):
+
 - [ ] Model record in `Models/`
 - [ ] Reader in `Readers/` with `Parse()` and optionally `ParseFromString()`
 - [ ] Writer in `Writers/` using typed SDK messages
@@ -308,6 +322,18 @@ The commit flow is crash-resilient:
 - [ ] Verification handling in post-re-export section
 - [ ] SKILL.md updated with new command documentation
 - [ ] `--help` text for the new command
+- [ ] `dotnet build` passes
+
+For a direct command (no `_pending/` — see the documented exception above):
+
+- [ ] Queries live in a dedicated `Readers/` file, not inline in Program.cs
+- [ ] Pre-flight checks that refuse irreversible or destructive states before any write
+- [ ] Interactive confirmation that echoes what will be written and where; no `--yes` flag
+- [ ] Post-operation report of anything the operation could not carry
+- [ ] Command handler in Program.cs, plus a dispatch branch and a `PrintHelp` line
+- [ ] Its own `--help` block, and the command added to the `ownsHelp` allowlist in `Program.cs`
+      (the global `--help` guard runs before dispatch, so a subcommand's help is otherwise
+      unreachable — never widen the guard to all commands, that would make `commit --help` commit)
 - [ ] `dotnet build` passes
 
 ## Known Gaps / Backlog

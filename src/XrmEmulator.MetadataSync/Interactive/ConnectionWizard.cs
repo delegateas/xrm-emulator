@@ -134,11 +134,24 @@ public static class ConnectionWizard
 
     private static async Task<ConnectionSettings> DiscoverAndSelectEnvironmentAsync(string? configClientId)
     {
+        var result = await DiscoverEnvironmentsAsync(configClientId);
+        var selected = PickEnvironment(result, $"Select a [green]Dataverse environment[/] ({result.Environments.Count} found):");
+        return ToConnectionSettings(result, selected);
+    }
+
+    /// <summary>
+    /// Signs the user in and lists every Dataverse environment they can reach via the
+    /// Global Discovery Service. The returned <see cref="DiscoveryResult"/> carries the
+    /// refresh token, so a single sign-in can back connections to several environments —
+    /// call <see cref="PickEnvironment"/> once per environment you need.
+    /// </summary>
+    public static async Task<DiscoveryResult> DiscoverEnvironmentsAsync(string? configClientId, bool noCache = false)
+    {
         var discoveryClientId = configClientId ?? ConnectionSettings.MicrosoftPublicClientId;
 
         AnsiConsole.MarkupLine("[grey]Discovering environments via Global Discovery Service...[/]");
 
-        var result = await EnvironmentDiscoveryService.DiscoverAsync(discoveryClientId);
+        var result = await EnvironmentDiscoveryService.DiscoverAsync(discoveryClientId, noCache);
 
         if (result.Environments.Count == 0)
             throw new InvalidOperationException(
@@ -146,11 +159,30 @@ public static class ConnectionWizard
 
         AnsiConsole.WriteLine();
 
+        return result;
+    }
+
+    /// <summary>
+    /// Prompts for one of the discovered environments and pre-caches its refresh token so the
+    /// subsequent Dataverse connection is silent. Pass <paramref name="exclude"/> to keep an
+    /// already-chosen environment out of the list.
+    /// </summary>
+    public static DiscoveredEnvironment PickEnvironment(
+        DiscoveryResult result, string title, DiscoveredEnvironment? exclude = null)
+    {
+        var choices = exclude == null
+            ? result.Environments
+            : result.Environments.Where(e => !string.Equals(e.Url, exclude.Url, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (choices.Count == 0)
+            throw new InvalidOperationException(
+                "No other Dataverse environment available to choose from.");
+
         var selected = AnsiConsole.Prompt(
             new SelectionPrompt<DiscoveredEnvironment>()
-                .Title($"Select a [green]Dataverse environment[/] ({result.Environments.Count} found):")
+                .Title(title)
                 .PageSize(15)
-                .AddChoices(result.Environments)
+                .AddChoices(choices)
                 .UseConverter(env =>
                 {
                     var name = Markup.Escape(env.FriendlyName);
@@ -163,11 +195,17 @@ public static class ConnectionWizard
         // Pre-cache the refresh token so OAuthTokenProvider can do a silent refresh
         TokenCache.Save(selected.Url, result.ClientId, selected.TenantId, result.RefreshToken);
 
-        return new ConnectionSettings
+        return selected;
+    }
+
+    /// <summary>
+    /// Wraps a discovered environment as connection settings for <c>ConnectionFactory</c>.
+    /// </summary>
+    public static ConnectionSettings ToConnectionSettings(DiscoveryResult result, DiscoveredEnvironment environment) =>
+        new()
         {
-            Url = selected.Url,
+            Url = environment.Url,
             ClientId = result.ClientId,
             AuthMode = AuthMode.InteractiveBrowser
         };
-    }
 }
