@@ -6,6 +6,7 @@ using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Organization;
 using Spectre.Console;
+using XrmEmulator.MetadataSync.Audit;
 using XrmEmulator.MetadataSync.Commit;
 using XrmEmulator.MetadataSync.Connection;
 using XrmEmulator.MetadataSync.Interactive;
@@ -152,7 +153,7 @@ try
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("webresource", StringComparison.OrdinalIgnoreCase))
     {
-        HandleWebResourceCommand(positionalArgs, args);
+        await HandleWebResourceCommand(positionalArgs, args, configuration, noCache);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("commandbar", StringComparison.OrdinalIgnoreCase))
     {
@@ -204,6 +205,14 @@ try
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("pcf", StringComparison.OrdinalIgnoreCase))
     {
         HandlePcfCommand(positionalArgs, args);
+    }
+    // `audit securityroles` is an alias for `security-role audit` — the noun-first form is
+    // canonical, but the audit reads naturally as its own verb and both are documented.
+    else if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("audit", StringComparison.OrdinalIgnoreCase)
+        && (positionalArgs[1].Equals("securityroles", StringComparison.OrdinalIgnoreCase)
+            || positionalArgs[1].Equals("security-roles", StringComparison.OrdinalIgnoreCase)))
+    {
+        await HandleSecurityRoleAuditCommand(args, configuration, noCache);
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("security-role", StringComparison.OrdinalIgnoreCase))
     {
@@ -2178,6 +2187,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]user access[/] <id|email|name> [[--json]]             List a user's direct roles, team memberships, and team-granted roles");
     AnsiConsole.MarkupLine("  [bold]security-role add[/] <role> <entity> <access> [[depth]]  Stage a privilege on a security role");
     AnsiConsole.MarkupLine("  [bold]security-role sync[/]                                 Refresh SecurityRoles/ + security-roles.md from CRM (no full sync)");
+    AnsiConsole.MarkupLine("  [bold]security-role audit[/] [[--scope touched|solution|all]]  Append-only privilege audit with a justification column (also: audit securityroles)");
     AnsiConsole.MarkupLine("  [bold]orgsetting list[/] [[--json]]                          List every setting in orgdborgsettings (live, entire environment)");
     AnsiConsole.MarkupLine("  [bold]orgsetting get[/] <name> [[--json]]                    Show one orgdborgsettings value (live)");
     AnsiConsole.MarkupLine("  [bold]orgsetting set[/] <name> <value>                     Stage an orgdborgsettings change (entire environment)");
@@ -2361,7 +2371,7 @@ static void HandleAppModuleBpfCommand(string[] positionalArgs, string[] allArgs)
 // ──────────────────────────────────────────────────────────────
 // webresource new <name> <file> — stage a web resource upload
 // ──────────────────────────────────────────────────────────────
-static void HandleWebResourceCommand(string[] positionalArgs, string[] allArgs)
+static async Task HandleWebResourceCommand(string[] positionalArgs, string[] allArgs, IConfiguration configuration, bool noCache)
 {
     if (positionalArgs.Length < 2)
     {
@@ -2375,7 +2385,7 @@ static void HandleWebResourceCommand(string[] positionalArgs, string[] allArgs)
     }
     else if (positionalArgs[1].Equals("checkout", StringComparison.OrdinalIgnoreCase))
     {
-        HandleWebResourceCheckoutCommand(positionalArgs);
+        await HandleWebResourceCheckoutCommand(positionalArgs, configuration, noCache);
     }
     else
     {
@@ -2449,7 +2459,7 @@ static void HandleWebResourceNewCommand(string[] positionalArgs, string[] allArg
     AnsiConsole.MarkupLine($"[grey]Run [blue]commit[/] to upload to CRM.[/]");
 }
 
-static void HandleWebResourceCheckoutCommand(string[] positionalArgs)
+static async Task HandleWebResourceCheckoutCommand(string[] positionalArgs, IConfiguration configuration, bool noCache)
 {
     if (positionalArgs.Length < 3)
     {
@@ -2461,54 +2471,62 @@ static void HandleWebResourceCheckoutCommand(string[] positionalArgs)
     var metadataPath = FindConnectionMetadata();
     var baseDir = GetBaseDir(metadataPath);
 
-    // Find the web resource in the solution export
-    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
-    var webResDirectories = Directory.GetDirectories(solutionExportDir, "WebResources", SearchOption.AllDirectories)
-        .Where(d => !d.Contains("_pending") && !d.Contains("_committed"))
-        .ToList();
+    // Always check out the live copy. The solution export on disk is only as fresh as the
+    // last full sync, so checking out from it can silently hand back a stale file — and the
+    // subsequent commit then overwrites whatever anyone changed in the meantime.
+    var metadata = ReadConnectionMetadata(metadataPath);
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
 
-    string? foundContentFile = null;
-    string? foundDataXml = null;
-
-    foreach (var dir in webResDirectories)
+    var query = new Microsoft.Xrm.Sdk.Query.QueryExpression("webresource")
     {
-        // Content file has no extension in solution export
-        var contentPath = Path.Combine(dir, webResourceName);
-        var dataXmlPath = Path.Combine(dir, $"{webResourceName}.data.xml");
-
-        if (File.Exists(contentPath) && File.Exists(dataXmlPath))
+        ColumnSet = new Microsoft.Xrm.Sdk.Query.ColumnSet(
+            "name", "displayname", "webresourcetype", "content", "modifiedon"),
+        Criteria =
         {
-            foundContentFile = contentPath;
-            foundDataXml = dataXmlPath;
-            break;
+            Conditions =
+            {
+                new Microsoft.Xrm.Sdk.Query.ConditionExpression(
+                    "name", Microsoft.Xrm.Sdk.Query.ConditionOperator.Equal, webResourceName)
+            }
         }
-    }
+    };
 
-    if (foundContentFile == null || foundDataXml == null)
+    var result = client.RetrieveMultiple(query);
+    if (result.Entities.Count == 0)
     {
-        AnsiConsole.MarkupLine($"[red]Web resource not found:[/] {webResourceName}");
-        AnsiConsole.MarkupLine("[grey]Searched in SolutionExport/*/WebResources/[/]");
+        AnsiConsole.MarkupLine($"[red]Web resource not found in {metadata.Environment.Url}:[/] {webResourceName}");
+        AnsiConsole.MarkupLine("[grey]Checkout reads the live environment. Use [blue]webresource new[/] to create a new one.[/]");
         Environment.Exit(1);
     }
 
-    // Parse the .data.xml to get metadata
-    var dataDoc = System.Xml.Linq.XDocument.Load(foundDataXml);
-    var wrRoot = dataDoc.Root!;
-    var wrName = wrRoot.Element("Name")?.Value ?? webResourceName;
-    var wrDisplayName = wrRoot.Element("DisplayName")?.Value ?? webResourceName;
-    var wrType = int.TryParse(wrRoot.Element("WebResourceType")?.Value, out var t) ? t : 3;
+    var record = result.Entities[0];
+    var wrName = record.GetAttributeValue<string>("name") ?? webResourceName;
+    var wrDisplayName = record.GetAttributeValue<string>("displayname") ?? wrName;
+    var wrType = record.GetAttributeValue<OptionSetValue>("webresourcetype")?.Value ?? 3;
+    var wrModifiedOn = record.GetAttributeValue<DateTime>("modifiedon");
+    var contentBase64 = record.GetAttributeValue<string>("content");
+
+    if (string.IsNullOrWhiteSpace(contentBase64))
+    {
+        AnsiConsole.MarkupLine($"[red]Web resource has no content:[/] {wrName}");
+        Environment.Exit(1);
+    }
+
+    var contentBytes = Convert.FromBase64String(contentBase64!);
 
     // Determine file extension from type
     var extMap = new Dictionary<int, string> { [1] = ".html", [2] = ".xml", [3] = ".js", [4] = ".css", [11] = ".svg" };
     var ext = extMap.GetValueOrDefault(wrType, ".js");
 
-    // Copy to _pending
     var pendingWebResDir = Path.Combine(baseDir, "SolutionExport", "_pending", "WebResources");
     Directory.CreateDirectory(pendingWebResDir);
 
     var safeName = wrName.Replace("/", "-").Replace("\\", "-");
     var destPath = Path.Combine(pendingWebResDir, $"{safeName}{ext}");
-    File.Copy(foundContentFile, destPath, overwrite: true);
+    File.WriteAllBytes(destPath, contentBytes);
 
     // Create the JSON marker
     var definition = new WebResourceUploadDefinition
@@ -2523,11 +2541,39 @@ static void HandleWebResourceCheckoutCommand(string[] positionalArgs)
     var json = JsonSerializer.Serialize(definition, new JsonSerializerOptions { WriteIndented = true });
     File.WriteAllText(jsonPath, json);
 
-    AnsiConsole.MarkupLine($"[green]Checked out web resource:[/] {wrName}");
-    AnsiConsole.MarkupLine($"  File:    {destPath}");
-    AnsiConsole.MarkupLine($"  Marker:  {jsonPath}");
-    AnsiConsole.MarkupLine($"  Type:    {ext.TrimStart('.')} ({wrType})");
+    AnsiConsole.MarkupLine($"[green]Checked out web resource from {metadata.Environment.Url}:[/] {wrName}");
+    AnsiConsole.MarkupLine($"  File:      {destPath}");
+    AnsiConsole.MarkupLine($"  Marker:    {jsonPath}");
+    AnsiConsole.MarkupLine($"  Type:      {ext.TrimStart('.')} ({wrType})");
+    AnsiConsole.MarkupLine($"  Live size: {contentBytes.Length} bytes, modified {wrModifiedOn.ToLocalTime():yyyy-MM-dd HH:mm}");
+
+    ReportWebResourceExportDrift(baseDir, webResourceName, contentBytes);
+
     AnsiConsole.MarkupLine($"[yellow]Edit the file above, then run [blue]commit[/] to push to CRM.[/]");
+}
+
+// The solution export is not the source of truth for checkout any more, but it is still what
+// most other commands read — so when it has drifted from the live copy, say so rather than
+// leaving a stale file lying around to be found by something else later.
+static void ReportWebResourceExportDrift(string baseDir, string webResourceName, byte[] liveContent)
+{
+    var solutionExportDir = Path.Combine(baseDir, "SolutionExport");
+    if (!Directory.Exists(solutionExportDir)) return;
+
+    var exportedFiles = Directory.GetDirectories(solutionExportDir, "WebResources", SearchOption.AllDirectories)
+        .Where(d => !d.Contains("_pending") && !d.Contains("_committed"))
+        .Select(d => Path.Combine(d, webResourceName))
+        .Where(File.Exists)
+        .ToList();
+
+    foreach (var file in exportedFiles)
+    {
+        if (File.ReadAllBytes(file).SequenceEqual(liveContent)) continue;
+
+        AnsiConsole.MarkupLine($"[yellow]Note:[/] the solution export differs from the live copy:");
+        AnsiConsole.MarkupLine($"  [grey]{file}[/]");
+        AnsiConsole.MarkupLine($"  [grey]The checked-out file above is the live one. Re-run a full sync to refresh the export.[/]");
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -5466,6 +5512,9 @@ static async Task HandleSecurityRoleCommand(
         case "sync":
             await HandleSecurityRoleSyncCommand(configuration, noCache);
             break;
+        case "audit":
+            await HandleSecurityRoleAuditCommand(allArgs, configuration, noCache);
+            break;
         case "add":
             HandleSecurityRoleAddCommand(positionalArgs);
             break;
@@ -5515,6 +5564,236 @@ static async Task HandleSecurityRoleSyncCommand(IConfiguration configuration, bo
     AnsiConsole.MarkupLine(
         $"[green]Wrote {securityRoles.Count} roles[/] ([bold]{withPrivileges}[/] with privileges) to [grey]{Markup.Escape(Path.Combine(baseDir, "SecurityRoles"))}[/]");
     AnsiConsole.MarkupLine($"[grey]Updated TypeDeclarations.cs and Model/security-roles.md[/]");
+}
+
+// ──────────────────────────────────────────────────────────────
+// security-role audit — append-only privilege audit with a justification column
+// ──────────────────────────────────────────────────────────────
+// Read-only against CRM: the only thing written is a local markdown file. The file is the
+// checklist for "can we justify every privilege we granted", so the generator never deletes a
+// row and never touches the hand-written Justification column — see SecurityRoleAuditDocument.
+static async Task HandleSecurityRoleAuditCommand(
+    string[] allArgs,
+    IConfiguration configuration,
+    bool noCache)
+{
+    var metadataPath = FindConnectionMetadata();
+    var metadata = ReadConnectionMetadata(metadataPath);
+    var baseDir = GetBaseDir(metadataPath);
+
+    var scopeArg = ParseNamedArg(allArgs, "--scope");
+    var explicitRoles = ParseRepeatedNamedArg(allArgs, "--role");
+
+    // --role on its own narrows to exactly those roles; combined with an explicit --scope it
+    // widens that scope. Without either, the default is every role this repo has touched.
+    var scope = (scopeArg ?? (explicitRoles.Count > 0 ? "roles" : "touched")).ToLowerInvariant();
+    if (scope is not ("touched" or "solution" or "all" or "roles"))
+    {
+        AnsiConsole.MarkupLine("[red]--scope must be one of: touched, solution, all[/]");
+        Environment.Exit(1);
+        return;
+    }
+    var dryRun = HasFlag(allArgs, "--dry-run");
+    var outPath = ParseNamedArg(allArgs, "--out")
+        ?? Path.Combine(baseDir, "security-role-audit.md");
+    outPath = Path.GetFullPath(outPath);
+
+    var justificationsPath = ParseNamedArg(allArgs, "--justifications");
+    if (justificationsPath is not null)
+    {
+        justificationsPath = Path.GetFullPath(justificationsPath);
+        if (!File.Exists(justificationsPath))
+        {
+            AnsiConsole.MarkupLine($"[red]--justifications file not found:[/] {Markup.Escape(justificationsPath)}");
+            Environment.Exit(1);
+            return;
+        }
+    }
+
+    AnsiConsole.MarkupLine("[grey]Connecting to Dataverse...[/]");
+    var connectionSettings = await ReconnectFromMetadata(metadata, configuration, noCache);
+    using var client = await ConnectionFactory.CreateAsync(connectionSettings);
+    AnsiConsole.MarkupLine("[green]Connected.[/]");
+
+    AnsiConsole.MarkupLine("[grey]Reading security roles and role privileges...[/]");
+    var allRoles = RolePrivilegeGrantReader.Read(client);
+
+    // Resolve which roles the audit covers.
+    var requested = new HashSet<string>(explicitRoles, StringComparer.OrdinalIgnoreCase);
+    var scopeLabel = scope;
+
+    if (scope == "solution" || scope == "touched")
+    {
+        if (metadata.Solution is not null)
+        {
+            var solutionRoles = SolutionSecurityRoleReader.GetSolutionRoleNames(client, metadata.Solution.Id);
+            requested.UnionWith(solutionRoles);
+            AnsiConsole.MarkupLine($"[grey]{solutionRoles.Count} role(s) are components of {metadata.Solution.UniqueName}.[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[yellow]No solution recorded in connection_metadata.json — solution scope contributes nothing.[/]");
+        }
+    }
+
+    if (scope == "touched")
+    {
+        var localRoles = SolutionSecurityRoleReader.GetLocallyModifiedRoleNames(baseDir);
+        requested.UnionWith(localRoles);
+        AnsiConsole.MarkupLine($"[grey]{localRoles.Count} role(s) have staged privilege changes in this environment directory.[/]");
+    }
+
+    List<RolePrivilegeGrantReader.RoleGrants> rolesInScope;
+    if (scope == "all")
+    {
+        rolesInScope = allRoles.Where(r => r.Grants.Count > 0).ToList();
+        scopeLabel = "all (every role in the environment that holds privileges)";
+    }
+    else
+    {
+        if (requested.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[red]No roles in scope.[/] Add roles with --role, or use --scope all.");
+            Environment.Exit(1);
+            return;
+        }
+
+        rolesInScope = allRoles.Where(r => requested.Contains(r.RoleName)).ToList();
+        scopeLabel = scope switch
+        {
+            "roles" => $"{explicitRoles.Count} role(s) named with --role",
+            _ when explicitRoles.Count > 0 => $"{scope} + {explicitRoles.Count} explicit --role",
+            _ => scope
+        };
+    }
+
+    if (rolesInScope.Count == 0)
+    {
+        AnsiConsole.MarkupLine("[red]None of the roles in scope exist in this environment.[/]");
+        Environment.Exit(1);
+        return;
+    }
+
+    // Parse the existing document so hand-written justifications survive.
+    var existing = new SecurityRoleAuditDocument.ParsedDocument([], string.Empty, string.Empty, false, false);
+    var fileExisted = File.Exists(outPath);
+    if (fileExisted)
+    {
+        var previous = File.ReadAllText(outPath);
+        existing = SecurityRoleAuditDocument.Parse(previous);
+
+        // Refuse rather than silently drop justifications if the file is not one of ours.
+        if (!existing.LooksLikeAuditFile)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(outPath)} exists but is not a security-role audit file[/] "
+                + "(no '## Privileges' section). Refusing to overwrite it — pass --out to write elsewhere.");
+            Environment.Exit(1);
+            return;
+        }
+
+        // The first version of this file had one row per entity rather than per grant. Rows can't be
+        // migrated automatically (many entity rows collapse into one grant), so refuse rather than
+        // discard whatever justifications were written against the old shape.
+        if (existing.IsEntityKeyedFormat)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(outPath)} uses the older entity-keyed table format[/] "
+                + "(| Entity | Privilege | …). Rows are now one per privilege grant, so justifications "
+                + "cannot be carried over automatically. Move any justifications you want to keep, then "
+                + "delete or rename the file and re-run.");
+            Environment.Exit(1);
+            return;
+        }
+
+        AnsiConsole.MarkupLine($"[grey]Existing audit: {existing.Rows.Count} row(s), "
+            + $"{existing.Rows.Count(r => r.IsJustified)} justified.[/]");
+    }
+
+    var runStamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    var runDate = DateTime.Now.ToString("yyyy-MM-dd");
+
+    var merge = SecurityRoleAuditDocument.Merge(existing.Rows, rolesInScope, requested, runDate);
+
+    var rendered = SecurityRoleAuditDocument.Render(
+        metadata.Environment.Url,
+        metadata.Solution?.UniqueName,
+        scopeLabel,
+        runStamp,
+        merge.Rows,
+        merge.Changes,
+        merge.RolesNotFound,
+        existing.FreeText,
+        existing.ChangeLog);
+
+    // Report before writing so --dry-run and the real run say the same thing.
+    var table = new Table().Border(TableBorder.Rounded);
+    table.AddColumn("Change");
+    table.AddColumn(new TableColumn("Count").RightAligned());
+    foreach (var kind in new[] { "new", "depth", "scope", "removed", "re-added" })
+    {
+        var count = merge.Changes.Count(c => c.Kind == kind);
+        if (count > 0) table.AddRow(kind, count.ToString());
+    }
+    if (merge.Changes.Count == 0) table.AddRow("[grey]none[/]", "0");
+    AnsiConsole.Write(table);
+
+    var active = merge.Rows.Count(r => !r.IsRemoved);
+    var unjustified = merge.Rows.Count(r => !r.IsRemoved && !r.IsJustified);
+    AnsiConsole.MarkupLine($"[grey]{rolesInScope.Count} role(s), {merge.Rows.Count} grant(s) "
+        + $"({active} active), [bold]{unjustified}[/] awaiting justification.[/]");
+
+    foreach (var role in merge.RolesNotFound)
+        AnsiConsole.MarkupLine($"[yellow]Role '{Markup.Escape(role)}' is in scope but not in this environment — rows left untouched.[/]");
+
+    // Resolve J-nnn references in the Justification column against the reason catalogue, if given.
+    if (justificationsPath is not null)
+    {
+        var defined = JustificationCatalogue.Load(File.ReadAllText(justificationsPath));
+        var validation = JustificationCatalogue.Validate(merge.Rows.Where(r => !r.IsRemoved), defined);
+
+        AnsiConsole.MarkupLine($"[grey]Justification catalogue: {defined.Count} reason id(s) in "
+            + $"{Markup.Escape(Path.GetFileName(justificationsPath))}; "
+            + $"{validation.ReferencingRows} row(s) refer to one.[/]");
+
+        foreach (var id in validation.UnknownReferences)
+            AnsiConsole.MarkupLine($"[red]Unknown justification id {id}[/] — referenced in the audit but not defined in the catalogue.");
+
+        if (defined.Count > 0 && validation.Unreferenced.Count > 0)
+            AnsiConsole.MarkupLine($"[yellow]{validation.Unreferenced.Count} reason id(s) are defined but never referenced.[/]");
+    }
+
+    if (dryRun)
+    {
+        AnsiConsole.MarkupLine("[yellow]--dry-run: nothing written.[/]");
+        return;
+    }
+
+    if (fileExisted)
+    {
+        var backupPath = outPath + ".bak";
+        File.Copy(outPath, backupPath, overwrite: true);
+        AnsiConsole.MarkupLine($"[grey]Backup: {Markup.Escape(backupPath)}[/]");
+    }
+
+    Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+    File.WriteAllText(outPath, rendered);
+
+    AnsiConsole.MarkupLine($"[green]Wrote[/] {Markup.Escape(outPath)}");
+    if (unjustified > 0)
+        AnsiConsole.MarkupLine($"[yellow]{unjustified} row(s) have an empty Justification column — fill those in.[/]");
+}
+
+/// <summary>
+/// Collects every occurrence of a repeated named argument (e.g. --role A --role B).
+/// </summary>
+static List<string> ParseRepeatedNamedArg(string[] allArgs, string name)
+{
+    var values = new List<string>();
+    for (var i = 0; i < allArgs.Length; i++)
+    {
+        if (allArgs[i].Equals(name, StringComparison.OrdinalIgnoreCase) && i + 1 < allArgs.Length)
+            values.Add(allArgs[i + 1]);
+    }
+    return values;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -5682,6 +5961,25 @@ static void PrintSecurityRoleUsage()
     AnsiConsole.MarkupLine("    Re-read all roles + privileges from CRM and rewrite SecurityRoles/*.xml,");
     AnsiConsole.MarkupLine("    TypeDeclarations.cs and Model/security-roles.md. Reads live (no pending file).");
     AnsiConsole.MarkupLine("    [grey]Example: security-role sync[/]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]audit[/] [[--scope touched|solution|all]] [[--role <name>]] [[--out <path>]] [[--justifications <path>]] [[--dry-run]]");
+    AnsiConsole.MarkupLine("    Write/refresh the append-only privilege audit: every privilege granted to every role in");
+    AnsiConsole.MarkupLine("    scope, in a markdown table with a hand-maintained [bold]Justification[/] column. One row is one");
+    AnsiConsole.MarkupLine("    grant, with the entities it reaches in [bold]Applies to[/] — a privilege covering all activity types");
+    AnsiConsole.MarkupLine("    is one row, not thirty. Reads live; the only thing written is the markdown file. Re-running");
+    AnsiConsole.MarkupLine("    never overwrites justifications and never deletes rows — new grants are appended, withdrawn");
+    AnsiConsole.MarkupLine("    ones marked removed, and each run prepends a change-log entry.");
+    AnsiConsole.MarkupLine("    Also available as [bold]audit securityroles[/].");
+    AnsiConsole.MarkupLine("    [grey]--scope touched  (default) roles in the solution + roles with staged privilege changes here[/]");
+    AnsiConsole.MarkupLine("    [grey]--scope solution roles that are components of the current solution only[/]");
+    AnsiConsole.MarkupLine("    [grey]--scope all      every role in the environment that holds privileges[/]");
+    AnsiConsole.MarkupLine("    [grey]--role           narrows to exactly the named role(s) (repeatable); rows for other[/]");
+    AnsiConsole.MarkupLine("    [grey]                 roles are left untouched. With an explicit --scope it widens instead.[/]");
+    AnsiConsole.MarkupLine("    [grey]--out            default: <env-dir>/security-role-audit.md[/]");
+    AnsiConsole.MarkupLine("    [grey]--justifications markdown file defining reason ids (any table row whose first cell is a[/]");
+    AnsiConsole.MarkupLine("    [grey]                 bare J-nnn). Reports J-nnn references in the audit that don't resolve,[/]");
+    AnsiConsole.MarkupLine("    [grey]                 and reasons nothing points at. Validation only — nothing is written.[/]");
+    AnsiConsole.MarkupLine("    [grey]Example: security-role audit --role \"02 Rådgiver\" --out ../../../docs/privilege-audit-kf-dev.md[/]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("  [yellow]add[/] <role-name> <entity> <access> [[depth]]");
     AnsiConsole.MarkupLine("    Add a privilege to a security role. Merges with existing pending file if present.");

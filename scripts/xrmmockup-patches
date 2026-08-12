@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# Manage the local patches we carry on top of the XrmMockup submodule.
+#
+# XrmMockup (external/XrmMockup) is upstream — delegateas/XrmMockup — and we cannot land changes
+# there without the owner's review. We nonetheless depend on a handful of behaviour changes to run
+# KF plugins in the emulator. Keeping them as working-tree edits is fragile: a single
+# `git submodule update` discards them silently, and a test run against an unpatched XrmMockup
+# reports wrong results rather than failing.
+#
+# So the changes live as patch files in patches/xrmmockup/ and are re-applied by this script.
+# Every patch is also a ready-made upstream PR when the owner has time to review one.
+#
+# Usage:
+#   xrmmockup-patches apply            Apply every patch (idempotent — already-applied ones skipped)
+#   xrmmockup-patches check            Exit non-zero if any patch is missing. Read-only.
+#   xrmmockup-patches status           List each patch as applied / not applied
+#   xrmmockup-patches save NNN-name PATH...   Capture working-tree changes into a patch file
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SUBMODULE="$REPO_ROOT/external/XrmMockup"
+PATCH_DIR="$REPO_ROOT/patches/xrmmockup"
+BASE_FILE="$PATCH_DIR/BASE"
+
+die() { echo "xrmmockup-patches: $*" >&2; exit 1; }
+
+[ -d "$SUBMODULE/.git" ] || [ -f "$SUBMODULE/.git" ] || die \
+    "XrmMockup submodule is not checked out at $SUBMODULE.
+  Run: git submodule update --init --recursive"
+
+# All git plumbing below runs inside the submodule.
+cd "$SUBMODULE"
+
+patch_files() {
+    # Applied in filename order — the numeric prefix is the sequence. 002 and 004 both touch
+    # Security.cs, so order is load-bearing, not cosmetic.
+    find "$PATCH_DIR" -maxdepth 1 -name '*.patch' -type f | sort
+}
+
+# Warn when the submodule has moved off the commit the patches were authored against. They may well
+# still apply — this is a heads-up for when one of them later fails, not a hard gate.
+warn_if_base_moved() {
+    [ -f "$BASE_FILE" ] || return 0
+    local base head
+    base="$(tr -d '[:space:]' < "$BASE_FILE")"
+    head="$(git rev-parse HEAD)"
+    case "$head" in
+        "$base"*) return 0 ;;
+    esac
+    echo "xrmmockup-patches: warning: patches were authored against $base but HEAD is ${head:0:12}." >&2
+    echo "  If a patch fails below, rebase it onto the new HEAD and update patches/xrmmockup/BASE." >&2
+}
+
+# 0 = fully applied, 1 = not applied, 2 = neither (partially applied or conflicting)
+patch_state() {
+    local patch="$1"
+    if git apply --reverse --check "$patch" >/dev/null 2>&1; then echo 0
+    elif git apply --check "$patch" >/dev/null 2>&1; then echo 1
+    else echo 2
+    fi
+}
+
+cmd_apply() {
+    warn_if_base_moved
+    local applied=0 skipped=0
+    for patch in $(patch_files); do
+        local name; name="$(basename "$patch")"
+        case "$(patch_state "$patch")" in
+            0) skipped=$((skipped + 1)); echo "  = $name (already applied)" ;;
+            1) git apply --3way "$patch" || die "failed to apply $name"
+               applied=$((applied + 1)); echo "  + $name" ;;
+            # Partially applied — e.g. `git submodule update` reset the tracked files but left the
+            # patch's new files behind. A 3-way merge reconciles that; if it cannot, stop rather
+            # than guess.
+            2) git apply --3way "$patch" 2>/dev/null || die "$name applies neither forward nor in reverse.
+  The submodule is in a state this script will not guess at — a partial application it could not
+  merge, or an upstream change that collides with the patch.
+  Inspect with:  cd $SUBMODULE && git apply --3way $patch"
+               applied=$((applied + 1)); echo "  ~ $name (reconciled from a partial state)" ;;
+        esac
+    done
+    echo "xrmmockup-patches: $applied applied, $skipped already present"
+}
+
+cmd_check() {
+    local missing=()
+    for patch in $(patch_files); do
+        [ "$(patch_state "$patch")" = "0" ] || missing+=("$(basename "$patch")")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "xrmmockup-patches: ${#missing[@]} patch(es) not applied to XrmMockup: ${missing[*]}" >&2
+        echo "  Run: $REPO_ROOT/scripts/xrmmockup-patches apply" >&2
+        exit 1
+    fi
+    echo "xrmmockup-patches: all patches applied"
+}
+
+cmd_status() {
+    warn_if_base_moved
+    for patch in $(patch_files); do
+        case "$(patch_state "$patch")" in
+            0) echo "  applied      $(basename "$patch")" ;;
+            1) echo "  MISSING      $(basename "$patch")" ;;
+            2) echo "  CONFLICTING  $(basename "$patch")" ;;
+        esac
+    done
+}
+
+# Capture working-tree changes for the given paths into patches/xrmmockup/<name>.patch.
+#
+# The delta is taken against HEAD *plus the patches already saved*, not against HEAD alone — so a
+# file touched by an earlier patch (Security.cs) yields only the new hunks rather than repeating
+# the earlier ones. That is done with a throwaway index: `git apply --cached` stages the existing
+# patches without touching the working tree, and the resulting tree becomes the diff base.
+cmd_save() {
+    local name="${1:-}"; shift || true
+    [ -n "$name" ] || die "usage: xrmmockup-patches save NNN-name PATH..."
+    [ $# -gt 0 ] || die "usage: xrmmockup-patches save NNN-name PATH..."
+
+    local out="$PATCH_DIR/${name%.patch}.patch"
+
+    # Untracked files are invisible to `git diff` until git knows their names. Note exactly which
+    # ones we mark, so the index can be put back as it was — an intent-to-add entry left behind
+    # makes `git checkout .` resurrect the file, which then looks like a half-applied patch.
+    local newly_added; newly_added="$(git ls-files --others --exclude-standard -- "$@")"
+    [ -z "$newly_added" ] || git add -N -- $newly_added
+
+    local tmp_index; tmp_index="$(mktemp)"
+    trap 'rm -f "$tmp_index"' RETURN
+
+    local base_tree
+    base_tree="$(
+        export GIT_INDEX_FILE="$tmp_index"
+        git read-tree HEAD
+        for patch in $(patch_files); do
+            [ "$patch" = "$out" ] && continue   # regenerating this one — exclude its old content
+            git apply --cached "$patch" 2>/dev/null || true
+        done
+        git write-tree
+    )"
+
+    local body; body="$(git diff "$base_tree" -- "$@")"
+    [ -z "$newly_added" ] || git rm --cached -q -- $newly_added
+    [ -n "$body" ] || die "no changes to save for: $*"
+
+    # Keep any hand-written header (everything above the first diff header) across regenerations —
+    # that is where the rationale for the patch lives.
+    local header=""
+    if [ -f "$out" ]; then
+        header="$(sed -n '1,/^diff --git /p' "$out" | sed '$d')"
+    fi
+    { [ -n "$header" ] && printf '%s\n' "$header"; printf '%s\n' "$body"; } > "$out"
+
+    echo "xrmmockup-patches: wrote $(basename "$out") ($(grep -c '^diff --git ' "$out") file(s))"
+}
+
+case "${1:-}" in
+    apply)  cmd_apply ;;
+    check)  cmd_check ;;
+    status) cmd_status ;;
+    save)   shift; cmd_save "$@" ;;
+    *)      sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1 ;;
+esac

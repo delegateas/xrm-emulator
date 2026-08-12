@@ -1,0 +1,43 @@
+# Unknown entity types resolve to "not found" instead of throwing.
+#
+# XrmMockup only knows the entities present in the metadata export. Plugins that touch platform
+# tables outside it — CustomerAccessCheckPlugin and PartnerAccountGuardPlugin read `privilege` —
+# hit an unhandled KeyNotFoundException deep inside the database layer rather than a miss.
+#
+# XrmDb.TryGetDbRow reports the miss (its whole contract is try-semantics), and
+# Security.HasPermission grants access when the record cannot be resolved, so an entity the
+# emulator has never heard of does not read as "access denied".
+#
+# Upstream-worthy: yes for the TryGetDbRow half. The HasPermission half is a deliberate
+# fail-open that upstream may reasonably want expressed as an opt-in setting instead.
+#
+diff --git a/src/XrmMockup365/Database/XrmDb.cs b/src/XrmMockup365/Database/XrmDb.cs
+index 3005518..b661ec7 100644
+--- a/src/XrmMockup365/Database/XrmDb.cs
++++ b/src/XrmMockup365/Database/XrmDb.cs
+@@ -194,6 +194,10 @@ internal bool TryGetDbRow(EntityReference reference, out DbRow dbRow)
+             DbRow currentDbRow = null;
+             dbRow = null;
+ 
++            // Unknown entity types are treated as "not found" rather than throwing.
++            if (reference?.LogicalName != null && !EntityMetadata.ContainsKey(reference.LogicalName))
++                return false;
++
+             if (reference?.Id != default && reference?.Id != Guid.Empty)
+             {
+                 currentDbRow = this[reference.LogicalName][reference.Id];
+diff --git a/src/XrmMockup365/Security.cs b/src/XrmMockup365/Security.cs
+index 1f6b979..c3cd7aa 100644
+--- a/src/XrmMockup365/Security.cs
++++ b/src/XrmMockup365/Security.cs
+@@ -532,7 +532,9 @@ internal bool HasSharePermission(Entity entity, AccessRights access, EntityRefer
+ 
+         internal bool HasPermission(EntityReference entityReference, AccessRights access, EntityReference caller)
+         {
+-            return HasPermission(Core.GetDbRow(entityReference).ToEntity(), access, caller);
++            var dbRow = Core.GetDbRowOrNull(entityReference);
++            if (dbRow == null) return true; // Unknown entity type or record not found — cannot check; grant access.
++            return HasPermission(dbRow.ToEntity(), access, caller);
+         }
+ 
+         internal bool HasPermission(Entity entity, AccessRights access, EntityReference caller)

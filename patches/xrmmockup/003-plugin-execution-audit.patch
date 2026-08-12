@@ -1,0 +1,98 @@
+# A live feed of synchronous plugin executions.
+#
+# PluginTrigger runs plugins but reports nothing about it, so there is no way to show which
+# plugins fired for a record — the thing you most want to see when a flow misbehaves in the
+# emulator UI. PluginExecutionAudit.Raise emits one record per invocation, success or fault.
+#
+# The hook has to live inside XrmMockup: the calls originate within its own plugin pipeline
+# against its internal service, which IXrmMockupExtension cannot reach.
+#
+# XrmEmulator/Services/PluginExecutionHistoryStore.cs is the consumer, and stays commented out
+# until this patch is a reliable part of every checkout.
+#
+# Upstream-worthy: yes, as an opt-in observability hook.
+#
+diff --git a/src/XrmMockup365/Plugin/PluginExecutionAudit.cs b/src/XrmMockup365/Plugin/PluginExecutionAudit.cs
+new file mode 100644
+index 0000000..8b6efbc
+--- /dev/null
++++ b/src/XrmMockup365/Plugin/PluginExecutionAudit.cs
+@@ -0,0 +1,33 @@
++using System;
++
++namespace DG.Tools.XrmMockup
++{
++    /// <summary>
++    /// One synchronous plugin invocation, raised by <see cref="PluginTrigger.ExecuteIfMatch"/> so a
++    /// host (e.g. XrmEmulator) can persist an execution history without XrmMockup owning any storage.
++    /// </summary>
++    public sealed class PluginExecutionRecord
++    {
++        public DateTimeOffset Timestamp { get; set; }
++        public string PluginTypeName { get; set; }
++        public string EntityLogicalName { get; set; }
++        public Guid EntityId { get; set; }
++        public string MessageName { get; set; }
++        public string Stage { get; set; }
++        public bool Success { get; set; }
++        public string Error { get; set; }
++    }
++
++    /// <summary>
++    /// Fire-and-forget hook a host can subscribe to for a live feed of plugin executions.
++    /// </summary>
++    public static class PluginExecutionAudit
++    {
++        public static event Action<PluginExecutionRecord> Executed;
++
++        internal static void Raise(PluginExecutionRecord record)
++        {
++            Executed?.Invoke(record);
++        }
++    }
++}
+diff --git a/src/XrmMockup365/Plugin/PluginTrigger.cs b/src/XrmMockup365/Plugin/PluginTrigger.cs
+index fe8cd88..8eb52b1 100644
+--- a/src/XrmMockup365/Plugin/PluginTrigger.cs
++++ b/src/XrmMockup365/Plugin/PluginTrigger.cs
+@@ -110,11 +110,18 @@ public void ExecuteIfMatch(object entityObject, Entity preImage, Entity postImag
+                 try
+                 {
+                     PluginExecute(provider);
++                    RecordExecution(guid, logicalName, thisPluginContext, success: true, error: null);
+                 }
+                 catch (TargetInvocationException e)
+                 {
++                    RecordExecution(guid, logicalName, thisPluginContext, success: false, error: e.InnerException?.Message ?? e.Message);
+                     ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+                 }
++                catch (Exception e)
++                {
++                    RecordExecution(guid, logicalName, thisPluginContext, success: false, error: e.Message);
++                    throw;
++                }
+ 
+                 foreach (var parameter in thisPluginContext.SharedVariables)
+                 {
+@@ -123,6 +130,21 @@ public void ExecuteIfMatch(object entityObject, Entity preImage, Entity postImag
+             }
+         }
+ 
++        private void RecordExecution(Guid entityId, string logicalName, PluginContext pluginContext, bool success, string error)
++        {
++            PluginExecutionAudit.Raise(new PluginExecutionRecord
++            {
++                Timestamp = DateTimeOffset.UtcNow,
++                PluginTypeName = PluginExecute.Target?.GetType().Name ?? "Unknown",
++                EntityLogicalName = logicalName,
++                EntityId = entityId,
++                MessageName = pluginContext.MessageName,
++                Stage = Stage.ToString(),
++                Success = success,
++                Error = error,
++            });
++        }
++
+         private void CheckInfiniteLoop(PluginContext pluginContext)
+         {
+             if (pluginContext.Depth > 8)

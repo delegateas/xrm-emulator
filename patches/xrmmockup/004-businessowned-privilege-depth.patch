@@ -1,0 +1,87 @@
+# Privilege depth is resolved for business-owned records.
+#
+# HasCallerPermission models only user- and team-owned records: below Global depth it looks up
+# the record's ownerid and compares the owner's business unit with the caller's. Business-owned
+# entities — systemuser, businessunit — have no ownerid, so the lookup fails and every depth
+# short of Global evaluates to no access.
+#
+# The consequence in KF: _Role_our_basisuser grants AppendTo on systemuser at Afdeling (Local)
+# depth, which is what a rådgiver needs to write kf_responsible on the Opportunity created during
+# lead qualification. The emulator denied it regardless, so the tests in
+# Security/QualifyLeadAppendToUserTests.cs could not distinguish a correct role from a broken one.
+#
+# This resolves depth against the record's own businessunitid instead: Basic = the caller's own
+# record, Local = the caller's business unit, Deep = its subtree. It covers every business-owned
+# entity, not just the one that surfaced the gap.
+#
+# Upstream-worthy: yes, straightforwardly — this is a missing ownership type, not a KF preference.
+#
+diff --git a/src/XrmMockup365/Security.cs b/src/XrmMockup365/Security.cs
+index c3cd7aa..a29ef05 100644
+--- a/src/XrmMockup365/Security.cs
++++ b/src/XrmMockup365/Security.cs
+@@ -449,6 +449,32 @@ private bool IsInBusinessUnitTree(EntityReference owner, Guid businessunitId)
+             return childBusinessUnits.Any(b => IsInBusinessUnitTree(owner, b.Id));
+         }
+ 
++        /// <summary>
++        /// The business unit a business-owned record belongs to, or null if it has none. The column
++        /// surfaces as an EntityReference through DbRow.ToEntity() but as a raw Guid on entities
++        /// built in test code, so both are accepted.
++        /// </summary>
++        private static Guid? GetBusinessUnitId(Entity entity)
++        {
++            if (!entity.Attributes.TryGetValue("businessunitid", out var value)) return null;
++            if (value is EntityReference reference) return reference.Id;
++            if (value is Guid id) return id;
++            return null;
++        }
++
++        /// <summary>
++        /// Whether a business unit is the given root or sits below it. The counterpart to
++        /// <see cref="IsInBusinessUnitTree"/> for records that are owned by a business unit rather
++        /// than by a user or team, so there is no owner to look up.
++        /// </summary>
++        private bool IsBusinessUnitInTree(Guid businessunitId, Guid rootBusinessunitId)
++        {
++            if (businessunitId == rootBusinessunitId) return true;
++
++            var childBusinessUnits = Core.GetDbTable(LogicalNames.BusinessUnit).Select(x => x.ToEntity()).Where(b => b.GetAttributeValue<EntityReference>("parentbusinessunitid")?.Id == rootBusinessunitId);
++            return childBusinessUnits.Any(b => IsBusinessUnitInTree(businessunitId, b.Id));
++        }
++
+         internal bool HasTeamMemberPermission(Entity entity, AccessRights access, EntityReference caller)
+         {
+             if (!entity.Attributes.ContainsKey("ownerid") || caller.LogicalName != LogicalNames.SystemUser)
+@@ -490,6 +516,31 @@ internal bool HasCallerPermission(Entity entity, AccessRights access, EntityRefe
+             // if max privelege depth is global, then caller can access all entities
+             if (maxRole == PrivilegeDepth.Global) return true;
+ 
++            // Business-owned records — systemuser, businessunit and friends — have no ownerid at
++            // all; they are scoped by the business unit they sit in. Resolve depth against that
++            // business unit, before the owner-based checks below, which would otherwise deny every
++            // depth short of Global for these entities.
++            if (!entity.Attributes.ContainsKey("ownerid"))
++            {
++                var recordBusinessUnitId = GetBusinessUnitId(entity);
++                if (recordBusinessUnitId.HasValue)
++                {
++                    // Basic depth means "your own record" — for systemuser that is the caller.
++                    if (maxRole == PrivilegeDepth.Basic) return entity.Id == caller.Id;
++
++                    var callerBusinessUnitId = Core.GetDbRow(caller).GetColumn<DbRow>("businessunitid")?.Id;
++                    if (!callerBusinessUnitId.HasValue) return false;
++
++                    if (maxRole == PrivilegeDepth.Local)
++                        return recordBusinessUnitId.Value == callerBusinessUnitId.Value;
++
++                    if (maxRole == PrivilegeDepth.Deep)
++                        return IsBusinessUnitInTree(recordBusinessUnitId.Value, callerBusinessUnitId.Value);
++
++                    return false;
++                }
++            }
++
+             // sets owner of entity to caller if there is no owner already
+             if (access == AccessRights.CreateAccess && !entity.Attributes.ContainsKey("ownerid"))
+             {

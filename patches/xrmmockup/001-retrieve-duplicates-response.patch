@@ -1,0 +1,29 @@
+# RetrieveDuplicatesRequest returns a typed, empty RetrieveDuplicatesResponse.
+#
+# XrmMockup does not implement duplicate detection. Listing the message in ExceptionFreeRequests
+# yields a bare OrganizationResponse, and reading Results["DuplicateCollection"] off it throws.
+# LeadDuplicateDetectionPlugin issues the request on every Lead create/update, so without this
+# every Lead test dies on a cast that has nothing to do with what it is testing.
+#
+# Upstream-worthy: yes — a stub response is strictly better than a crash for an unimplemented
+# message. Offer as a PR to delegateas/XrmMockup.
+#
+diff --git a/src/XrmMockup365/Core.cs b/src/XrmMockup365/Core.cs
+index 8fe3d26..7176916 100644
+--- a/src/XrmMockup365/Core.cs
++++ b/src/XrmMockup365/Core.cs
+@@ -1049,6 +1049,14 @@ internal void AddTime(TimeSpan offset)
+                 return handler.Execute(request, userRef);
+             }
+ 
++            if (request is RetrieveDuplicatesRequest)
++            {
++                return new RetrieveDuplicatesResponse
++                {
++                    Results = { ["DuplicateCollection"] = new EntityCollection() }
++                };
++            }
++
+             if (settings.ExceptionFreeRequests?.Contains(request.RequestName) ?? false)
+             {
+                 return new OrganizationResponse();
