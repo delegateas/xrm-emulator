@@ -6358,9 +6358,11 @@ static void PrintOptionSetUsage()
 {
     AnsiConsole.MarkupLine("[bold]MetadataSync optionset[/] — manage global option set values");
     AnsiConsole.WriteLine();
-    AnsiConsole.MarkupLine("  [yellow]add-value[/] <optionset-name> <label> [--value <int>]");
+    AnsiConsole.MarkupLine("  [yellow]add-value[/] <optionset-name> <label> [--value <int>] [--display-name <label>]");
     AnsiConsole.MarkupLine("    Add a new value to a global option set. Merges with existing pending file if present.");
     AnsiConsole.MarkupLine("    [grey]If --value is omitted, CRM auto-assigns the next available integer.[/]");
+    AnsiConsole.MarkupLine("    [grey]--display-name is used only when the option set has to be created; without it the[/]");
+    AnsiConsole.MarkupLine("    [grey]schema name becomes the label users see in every picklist.[/]");
     AnsiConsole.MarkupLine("    [grey]Example: optionset add-value kf_fieldinputtype \"Rådgiver\" --value 100000009[/]");
 }
 
@@ -6392,6 +6394,7 @@ static void HandleOptionSetAddValueCommand(string[] positionalArgs, string[] all
 
     // Load existing pending file if present (merge mode)
     var values = new List<OptionSetValueEntry>();
+    string? displayName = ParseNamedArg(allArgs, "--display-name");
     if (File.Exists(destPath))
     {
         try
@@ -6400,7 +6403,12 @@ static void HandleOptionSetAddValueCommand(string[] positionalArgs, string[] all
                 File.ReadAllText(destPath),
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true });
             if (existing != null)
+            {
                 values = existing.Values.ToList();
+                // A display name given on an earlier value stays — adding a second value should not
+                // have to repeat the flag, and must not silently drop the label.
+                displayName ??= existing.DisplayName;
+            }
         }
         catch { /* ignore parse errors, start fresh */ }
     }
@@ -6422,6 +6430,7 @@ static void HandleOptionSetAddValueCommand(string[] positionalArgs, string[] all
     var definition = new OptionSetValueDefinition
     {
         OptionSetName = optionSetName,
+        DisplayName = displayName,
         Values = values
     };
 

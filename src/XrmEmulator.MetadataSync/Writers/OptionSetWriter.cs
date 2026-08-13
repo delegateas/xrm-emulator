@@ -49,13 +49,25 @@ public static class OptionSetWriter
         {
             log?.Invoke($"  Option set '{def.OptionSetName}' not found — creating...");
 
-            var options = def.Values.Select(v => new OptionMetadata(
-                new Label(v.Label, 1030), v.Value)).ToArray();
+            var createLcid = GetOrgBaseLcid(service);
+
+            var options = def.Values.Select(v =>
+            {
+                var option = new OptionMetadata(new Label(v.Label, createLcid), v.Value);
+                // Carried on create too — the insert path below writes descriptions, so dropping
+                // them here would make the same definition file produce different metadata
+                // depending on whether the option set happened to exist already.
+                if (!string.IsNullOrEmpty(v.Description))
+                    option.Description = new Label(v.Description, createLcid);
+                return option;
+            }).ToArray();
 
             var newOptionSet = new OptionSetMetadata
             {
                 Name = def.OptionSetName,
-                DisplayName = new Label(def.OptionSetName, 1030),
+                // Falls back to the schema name only when no label was supplied — that shows users
+                // "kf_something" in every picklist, so the definition file should always carry one.
+                DisplayName = new Label(def.DisplayName ?? def.OptionSetName, createLcid),
                 IsGlobal = true,
                 OptionSetType = OptionSetType.Picklist,
             };

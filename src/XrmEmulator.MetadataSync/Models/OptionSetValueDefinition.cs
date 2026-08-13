@@ -3,6 +3,14 @@ namespace XrmEmulator.MetadataSync.Models;
 public record OptionSetValueDefinition
 {
     public required string OptionSetName { get; init; }
+
+    /// <summary>
+    /// Label shown to users, used when the option set has to be created. Without it the schema name
+    /// becomes the label — which is how an option set ends up presented to users as "kf_something".
+    /// Ignored when the option set already exists; renaming one is a separate, deliberate act.
+    /// </summary>
+    public string? DisplayName { get; init; }
+
     public required List<OptionSetValueEntry> Values { get; init; }
 }
 

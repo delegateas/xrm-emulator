@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using DG.Tools.XrmMockup;
 using Microsoft.Xrm.Sdk;
@@ -127,6 +128,9 @@ public static class MetadataFolderBuilder
 
         // Give every entity non-null relationship collections (see method doc).
         EnsureRelationshipCollections(combined!);
+
+        // Add columns that are staged in _pending/ but not yet committed to CRM (see method doc).
+        ApplyPendingAttributes(combined!, solutionExportsPath);
 
         // Write combined Metadata.xml
         var outputPath = Path.Combine(outputDir, "Metadata.xml");
@@ -445,6 +449,168 @@ public static class MetadataFolderBuilder
                 SetMetadataProperty(entity, "ManyToManyRelationships", Array.Empty<ManyToManyRelationshipMetadata>());
         }
     }
+
+    /// <summary>
+    /// Adds columns that are staged in <c>_pending/Attributes/</c> but not yet in CRM.
+    ///
+    /// Without this, code for a new column cannot be run or tested until someone has committed the
+    /// column and re-exported the metadata: XrmMockup validates every attribute against the exported
+    /// metadata and rejects the write with "'lead' entity doesn't contain attribute with Name = …".
+    /// That ordering is backwards — the column is staged precisely so the code that uses it can be
+    /// written — and it pushes developers towards committing metadata to get a green test run.
+    ///
+    /// Only additive, and only for columns metadata does not already describe: once the real column
+    /// arrives in the export, the export wins and this does nothing. A staged file is deleted by
+    /// <c>commit</c>, so <c>_pending/</c> stays an accurate list of what is coming.
+    ///
+    /// Picklist options are resolved from the staged definition — a local <c>options</c> array, or a
+    /// global option set staged alongside under <c>_pending/GlobalOptionSets/</c>. An option set that
+    /// is not staged locally yields an empty one, which is enough for XrmMockup to accept writes.
+    /// </summary>
+    private static void ApplyPendingAttributes(MetadataSkeleton skeleton, string solutionExportsPath)
+    {
+        if (!Directory.Exists(solutionExportsPath))
+            return;
+
+        foreach (var file in Directory.EnumerateFiles(solutionExportsPath, "*.attribute.json",
+                     SearchOption.AllDirectories))
+        {
+            // Only the pending queue — an archived copy under _committed/ describes a column the
+            // export already carries.
+            if (!file.Replace('\\', '/').Contains("/_pending/Attributes/"))
+                continue;
+
+            var definition = JsonNode.Parse(File.ReadAllText(file))?.AsObject();
+            var entityName = definition?["entityLogicalName"]?.GetValue<string>();
+            var attributeName = definition?["attributeLogicalName"]?.GetValue<string>();
+            if (definition == null || string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(attributeName))
+                continue;
+
+            // An entity the loaded solutions don't describe at all is out of scope here — there is no
+            // EntityMetadata to extend, and synthesising one would hide a missing export.
+            if (!skeleton.EntityMetadata.TryGetValue(entityName, out var entity) || entity.Attributes == null)
+                continue;
+
+            if (entity.Attributes.Any(a =>
+                    string.Equals(a.LogicalName, attributeName, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            var attribute = CreatePendingAttribute(definition, attributeName, file);
+            SetMetadataProperty(entity, "Attributes", entity.Attributes.Append(attribute).ToArray());
+        }
+    }
+
+    private static AttributeMetadata CreatePendingAttribute(
+        JsonObject definition, string attributeName, string file)
+    {
+        var type = definition["attributeType"]?.GetValue<string>()?.ToLowerInvariant();
+
+        switch (type)
+        {
+            case "picklist":
+                var picklist = CreateAttribute<PicklistAttributeMetadata>(attributeName, AttributeTypeCode.Picklist);
+                SetMetadataProperty(picklist, "OptionSet", BuildPendingOptionSet(definition, file));
+                return picklist;
+
+            case "boolean":
+                var boolean = CreateAttribute<BooleanAttributeMetadata>(attributeName, AttributeTypeCode.Boolean);
+                SetMetadataProperty(boolean, "OptionSet", new BooleanOptionSetMetadata(
+                    new OptionMetadata(MakeLabel("Ja"), 1),
+                    new OptionMetadata(MakeLabel("Nej"), 0)));
+                return boolean;
+
+            case "string":
+                return CreateAttribute<StringAttributeMetadata>(attributeName, AttributeTypeCode.String);
+            case "memo":
+                return CreateAttribute<MemoAttributeMetadata>(attributeName, AttributeTypeCode.Memo);
+            case "int":
+            case "integer":
+                return CreateAttribute<IntegerAttributeMetadata>(attributeName, AttributeTypeCode.Integer);
+            case "decimal":
+                return CreateAttribute<DecimalAttributeMetadata>(attributeName, AttributeTypeCode.Decimal);
+            case "money":
+                return CreateAttribute<MoneyAttributeMetadata>(attributeName, AttributeTypeCode.Money);
+            case "datetime":
+                return CreateAttribute<DateTimeAttributeMetadata>(attributeName, AttributeTypeCode.DateTime);
+
+            case "lookup":
+                var lookup = CreateAttribute<LookupAttributeMetadata>(attributeName, AttributeTypeCode.Lookup);
+                var targets = definition["targetEntityLogicalNames"]?.AsArray()
+                        ?.Select(t => t?.GetValue<string>()).Where(t => !string.IsNullOrEmpty(t)).ToArray()
+                    ?? [definition["targetEntityLogicalName"]?.GetValue<string>()];
+                SetMetadataProperty(lookup, "Targets", targets.Where(t => !string.IsNullOrEmpty(t)).ToArray());
+                return lookup;
+
+            default:
+                // Loud on purpose: a silently skipped column reappears as the same confusing
+                // "entity doesn't contain attribute" failure this method exists to prevent.
+                throw new NotSupportedException(
+                    $"Staged attribute '{attributeName}' in '{file}' has type '{type}', which " +
+                    $"{nameof(ApplyPendingAttributes)} cannot synthesize yet. Add it there.");
+        }
+    }
+
+    private static OptionSetMetadata BuildPendingOptionSet(JsonObject definition, string file)
+    {
+        var optionSet = new OptionSetMetadata();
+
+        // Local (entity-scoped) options are written straight into the attribute definition.
+        var localOptions = definition["options"]?.AsArray();
+        if (localOptions != null)
+        {
+            foreach (var option in localOptions)
+                AddOption(optionSet, option?["value"]?.GetValue<int>(), option?["label"]?.GetValue<string>());
+            return optionSet;
+        }
+
+        // A global option set lives in its own staged file next to the attribute's.
+        var optionSetName = definition["optionSetName"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(optionSetName))
+            return optionSet;
+
+        SetMetadataProperty(optionSet, "Name", optionSetName);
+        SetMetadataProperty(optionSet, "IsGlobal", true);
+
+        var pendingRoot = Path.GetDirectoryName(Path.GetDirectoryName(file));
+        var globalFile = pendingRoot == null
+            ? null
+            : Path.Combine(pendingRoot, "GlobalOptionSets", optionSetName + ".optionset.json");
+        if (globalFile == null || !File.Exists(globalFile))
+            return optionSet;
+
+        var globalDefinition = JsonNode.Parse(File.ReadAllText(globalFile))?.AsObject();
+        foreach (var value in globalDefinition?["values"]?.AsArray() ?? [])
+            AddOption(optionSet, value?["value"]?.GetValue<int>(), value?["label"]?.GetValue<string>());
+
+        return optionSet;
+
+        static void AddOption(OptionSetMetadata target, int? value, string? label)
+        {
+            if (value.HasValue)
+                target.Options.Add(new OptionMetadata(MakeLabel(label ?? value.Value.ToString()), value));
+        }
+    }
+
+    /// <summary>
+    /// A label with <see cref="Label.UserLocalizedLabel"/> filled in, not just the localised list.
+    /// The platform populates both on retrieve, and XrmMockup follows it: reading a picklist column
+    /// dereferences the option's UserLocalizedLabel to build the formatted value, so a label built
+    /// only from the constructor throws NullReferenceException from inside a parallel loop, arriving
+    /// as an AggregateException with nothing in it naming the column.
+    /// </summary>
+    private static Label MakeLabel(string text)
+    {
+        var localized = new LocalizedLabel(text, OrgBaseLcid);
+        var label = new Label(text, OrgBaseLcid);
+        SetMetadataProperty(label, "UserLocalizedLabel", localized);
+        return label;
+    }
+
+    /// <summary>
+    /// kf-dev's base language. Only ever seen in labels synthesized here, which nothing asserts on —
+    /// the org's real labels come from the export.
+    /// </summary>
+    private const int OrgBaseLcid = 1030;
 
     private static void EnsureEntity(MetadataSkeleton skeleton, string logicalName,
         OwnershipTypes ownership, params AttributeMetadata[] attributes)
