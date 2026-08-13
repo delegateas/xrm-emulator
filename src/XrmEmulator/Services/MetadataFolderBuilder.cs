@@ -129,8 +129,8 @@ public static class MetadataFolderBuilder
         // Give every entity non-null relationship collections (see method doc).
         EnsureRelationshipCollections(combined!);
 
-        // Add columns that are staged in _pending/ but not yet committed to CRM (see method doc).
-        ApplyPendingAttributes(combined!, solutionExportsPath);
+        // Add staged columns the exported metadata does not carry yet (see method doc).
+        ApplyStagedAttributes(combined!, solutionExportsPath);
 
         // Write combined Metadata.xml
         var outputPath = Path.Combine(outputDir, "Metadata.xml");
@@ -451,7 +451,9 @@ public static class MetadataFolderBuilder
     }
 
     /// <summary>
-    /// Adds columns that are staged in <c>_pending/Attributes/</c> but not yet in CRM.
+    /// Adds columns described by a staged attribute definition that the exported metadata does not
+    /// carry — whether the column is still queued in <c>_pending/Attributes/</c> or has been pushed to
+    /// CRM and archived to <c>_committed/Attributes/</c>.
     ///
     /// Without this, code for a new column cannot be run or tested until someone has committed the
     /// column and re-exported the metadata: XrmMockup validates every attribute against the exported
@@ -459,15 +461,19 @@ public static class MetadataFolderBuilder
     /// That ordering is backwards — the column is staged precisely so the code that uses it can be
     /// written — and it pushes developers towards committing metadata to get a green test run.
     ///
+    /// <c>_committed/</c> is read for the same reason. It means "pushed to CRM", not "present in the
+    /// local <c>Metadata.xml</c>": that snapshot is only refreshed by a separate, interactive sync, so
+    /// committing a column otherwise *breaks* every test that touches it — for everyone who pulls —
+    /// until someone happens to re-sync. The failure looks identical to never having staged it.
+    ///
     /// Only additive, and only for columns metadata does not already describe: once the real column
-    /// arrives in the export, the export wins and this does nothing. A staged file is deleted by
-    /// <c>commit</c>, so <c>_pending/</c> stays an accurate list of what is coming.
+    /// arrives in the export, the export wins and this does nothing, so nothing has to be cleaned up.
     ///
     /// Picklist options are resolved from the staged definition — a local <c>options</c> array, or a
-    /// global option set staged alongside under <c>_pending/GlobalOptionSets/</c>. An option set that
-    /// is not staged locally yields an empty one, which is enough for XrmMockup to accept writes.
+    /// global option set staged alongside under <c>GlobalOptionSets/</c>. An option set that is not
+    /// staged locally yields an empty one, which is enough for XrmMockup to accept writes.
     /// </summary>
-    private static void ApplyPendingAttributes(MetadataSkeleton skeleton, string solutionExportsPath)
+    private static void ApplyStagedAttributes(MetadataSkeleton skeleton, string solutionExportsPath)
     {
         if (!Directory.Exists(solutionExportsPath))
             return;
@@ -475,9 +481,8 @@ public static class MetadataFolderBuilder
         foreach (var file in Directory.EnumerateFiles(solutionExportsPath, "*.attribute.json",
                      SearchOption.AllDirectories))
         {
-            // Only the pending queue — an archived copy under _committed/ describes a column the
-            // export already carries.
-            if (!file.Replace('\\', '/').Contains("/_pending/Attributes/"))
+            var path = file.Replace('\\', '/');
+            if (!path.Contains("/_pending/Attributes/") && !path.Contains("/_committed/Attributes/"))
                 continue;
 
             var definition = JsonNode.Parse(File.ReadAllText(file))?.AsObject();
@@ -495,12 +500,12 @@ public static class MetadataFolderBuilder
                     string.Equals(a.LogicalName, attributeName, StringComparison.OrdinalIgnoreCase)))
                 continue;
 
-            var attribute = CreatePendingAttribute(definition, attributeName, file);
+            var attribute = CreateStagedAttribute(definition, attributeName, file);
             SetMetadataProperty(entity, "Attributes", entity.Attributes.Append(attribute).ToArray());
         }
     }
 
-    private static AttributeMetadata CreatePendingAttribute(
+    private static AttributeMetadata CreateStagedAttribute(
         JsonObject definition, string attributeName, string file)
     {
         var type = definition["attributeType"]?.GetValue<string>()?.ToLowerInvariant();
@@ -509,7 +514,7 @@ public static class MetadataFolderBuilder
         {
             case "picklist":
                 var picklist = CreateAttribute<PicklistAttributeMetadata>(attributeName, AttributeTypeCode.Picklist);
-                SetMetadataProperty(picklist, "OptionSet", BuildPendingOptionSet(definition, file));
+                SetMetadataProperty(picklist, "OptionSet", BuildStagedOptionSet(definition, file));
                 return picklist;
 
             case "boolean":
@@ -546,11 +551,11 @@ public static class MetadataFolderBuilder
                 // "entity doesn't contain attribute" failure this method exists to prevent.
                 throw new NotSupportedException(
                     $"Staged attribute '{attributeName}' in '{file}' has type '{type}', which " +
-                    $"{nameof(ApplyPendingAttributes)} cannot synthesize yet. Add it there.");
+                    $"{nameof(ApplyStagedAttributes)} cannot synthesize yet. Add it there.");
         }
     }
 
-    private static OptionSetMetadata BuildPendingOptionSet(JsonObject definition, string file)
+    private static OptionSetMetadata BuildStagedOptionSet(JsonObject definition, string file)
     {
         var optionSet = new OptionSetMetadata();
 
