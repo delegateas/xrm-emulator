@@ -56,9 +56,17 @@ public static class PendingVariableResolver
                     $"The referenced file has not been committed yet.");
 
             if (!outputs.TryGetValue(prop, out var value))
+            {
+                // A data import records one output key per row, so the full list can run to
+                // hundreds of names — show enough to spot a typo, not the whole file.
+                var available = outputs.Keys.Take(10).ToList();
+                var suffix = outputs.Count > available.Count
+                    ? $", … ({outputs.Count} in total)"
+                    : "";
                 throw new InvalidOperationException(
                     $"Unknown property '#{prop}' for {{{{_pending/{match.Groups["path"].Value}}}}}. " +
-                    $"Available properties: {string.Join(", ", outputs.Keys)}");
+                    $"Available properties: {string.Join(", ", available)}{suffix}");
+            }
 
             return value;
         });

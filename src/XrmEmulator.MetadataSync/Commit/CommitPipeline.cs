@@ -2600,7 +2600,19 @@ public static class CommitPipeline
 
                     case CommitItemType.DataImport:
                     {
-                        var def = (DataImportDefinition)item.ParsedData;
+                        // A row may reference a record an earlier import file wrote, by id:
+                        // {{_pending/Import/20-partners.import.json#<match key>}}. That is the only
+                        // way to point at a record whose name is not unique in the target
+                        // environment — so the definition is re-read from the resolved content
+                        // rather than the parse made when the file was listed.
+                        var def = resolvedContent != null
+                            ? JsonSerializer.Deserialize<DataImportDefinition>(resolvedContent,
+                                new JsonSerializerOptions
+                                {
+                                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                                    PropertyNameCaseInsensitive = true,
+                                })!
+                            : (DataImportDefinition)item.ParsedData;
                         log?.Invoke($"Importing {def.Rows.Count} row(s) into {def.Table} (match on: {string.Join("+", def.MatchOn)})");
 
                         // Optional impersonation: run this import's writes as a specific user
@@ -2672,9 +2684,13 @@ public static class CommitPipeline
                         {
                             if (impersonating)
                                 callerProp!.SetValue(client, originalCaller ?? Guid.Empty);
+                            // Publish the ids gathered so far even when a row failed: the rows before
+                            // it are already in CRM, and a dependent file resolving against them is
+                            // more useful than an all-or-nothing map. Rows are upserted on the match
+                            // key, so a re-run refills the rest without duplicating anything.
+                            resolvedOutputs[relativePath] = rowOutputs;
                         }
                         log?.Invoke($"  Import complete: {created} created, {updated} updated.");
-                        resolvedOutputs[relativePath] = rowOutputs;
                         break;
                     }
 
@@ -2759,6 +2775,9 @@ public static class CommitPipeline
 
                 failedItem = item;
                 failedException = ex;
+                // Keep whatever ids this item did produce before it failed — the outputs file is
+                // what a resume reads, and it is only deleted once the whole session succeeds.
+                try { WriteOutputsFile(outputsPath, resolvedOutputs); } catch { /* non-fatal */ }
                 log?.Invoke($"  FAILED after {maxRetries} attempts: {ex}");
                 break; // Stop processing — later items may depend on this one
             }

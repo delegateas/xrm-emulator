@@ -254,20 +254,29 @@ public static class DataImportWriter
         if (cache != null && cache.TryGetValue(cacheKey, out var cached))
             return cached;
 
+        // Two rows are fetched, not one: a lookup that matches several records has no correct
+        // answer, and picking the first silently points the import at an arbitrary record.
         var query = new QueryExpression(table)
         {
             ColumnSet = new ColumnSet(false),
-            TopCount = 1,
+            TopCount = 2,
             Criteria = new FilterExpression
             {
                 Conditions = { new ConditionExpression(matchField, ConditionOperator.Equal, matchValue) }
             }
         };
-        var result = service.RetrieveMultiple(query).Entities.FirstOrDefault()
-            ?? throw new InvalidOperationException(
+        var matches = service.RetrieveMultiple(query).Entities;
+        if (matches.Count == 0)
+            throw new InvalidOperationException(
                 $"Cannot resolve lookup: no '{table}' record found where {matchField} = '{matchValue}'");
+        if (matches.Count > 1)
+            throw new InvalidOperationException(
+                $"Cannot resolve lookup: more than one '{table}' record has {matchField} = '{matchValue}' " +
+                $"(e.g. {string.Join(", ", matches.Select(e => e.Id))}). " +
+                $"Pick a field that is unique in the target environment, or reference the record by id " +
+                $"via {{{{_pending/<file>#<key>}}}}.");
 
-        var entityRef = new EntityReference(table, result.Id);
+        var entityRef = new EntityReference(table, matches[0].Id);
         if (cache != null) cache[cacheKey] = entityRef;
         return entityRef;
     }
