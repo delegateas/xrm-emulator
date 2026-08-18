@@ -312,10 +312,19 @@ public class McpServer
         return async () =>
         {
             var metadata = LoadConnectionMetadata();
+
+            // The MCP server has no console to ask on, so a folder that leaves the identity to the
+            // operator cannot be served here — say so instead of throwing a bare parse error.
+            if (!Enum.TryParse<AuthMode>(metadata.AuthMode, ignoreCase: true, out var authMode))
+                throw new InvalidOperationException(
+                    $"connection_metadata.json in {_baseDir} has no usable authMode " +
+                    $"('{metadata.AuthMode ?? "not set"}'). The MCP server cannot prompt for one — run " +
+                    "a sync from the command line once to record how this folder signs in.");
+
             var settings = new ConnectionSettings
             {
                 Url = metadata.Environment.Url,
-                AuthMode = Enum.Parse<AuthMode>(metadata.AuthMode, ignoreCase: true),
+                AuthMode = authMode,
                 ClientId = metadata.ClientId,
                 NoCache = false
             };

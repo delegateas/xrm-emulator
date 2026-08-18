@@ -21,7 +21,7 @@ public static class DataImportWriter
         Dictionary<string, JsonElement?> row,
         Dictionary<string, EntityReference>? lookupCache = null)
     {
-        var existing = FindExisting(service, table, matchOn, fieldTypes, row);
+        var existing = FindExisting(service, table, matchOn, fieldTypes, row, lookupCache);
 
         var entity = existing != null
             ? new Entity(table, existing.Value)
@@ -124,7 +124,8 @@ public static class DataImportWriter
         string table,
         List<string> matchOn,
         Dictionary<string, string>? fieldTypes,
-        Dictionary<string, JsonElement?> row)
+        Dictionary<string, JsonElement?> row,
+        Dictionary<string, EntityReference>? lookupCache = null)
     {
         if (matchOn.Count == 0)
             return null;
@@ -155,6 +156,20 @@ public static class DataImportWriter
                     .ToArray();
                 query.Criteria.Conditions.Add(
                     new ConditionExpression(field, ConditionOperator.ContainValues, intValues));
+                continue;
+            }
+
+            // Lookup fields must be compared as Guid — a QueryExpression condition on a
+            // Lookup column rejects the "table:guid" / display-name string forms. This is what
+            // lets a child row be scoped to its parent, e.g. matching kf_partnerformline on
+            // kf_partnerform + kf_name.
+            if (declaredType != null
+                && declaredType.StartsWith("lookup", StringComparison.OrdinalIgnoreCase))
+            {
+                var reference = (EntityReference)MapWithDeclaredType(
+                    jsonValue.Value, declaredType, service, lookupCache);
+                query.Criteria.Conditions.Add(
+                    new ConditionExpression(field, ConditionOperator.Equal, reference.Id));
                 continue;
             }
 

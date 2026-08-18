@@ -8,6 +8,14 @@ public record DataImportDefinition
     public required List<string> MatchOn { get; init; }
 
     /// <summary>
+    /// Optional human-readable description of what this file imports, shown instead of the bare
+    /// table name in the pending list and the commit selection prompt. Several files importing the
+    /// same table are otherwise indistinguishable there — "account (214 row(s))" four times over —
+    /// which matters most when an operator who did not author the files has to select them all.
+    /// </summary>
+    public string? Label { get; init; }
+
+    /// <summary>
     /// Optional field type overrides for ambiguous types.
     /// Simple types: "int", "optionset", "decimal", "money", "string", "bool", "multiselect"
     /// Lookup (raw GUID): "lookup" — value must be "entityname:guid"

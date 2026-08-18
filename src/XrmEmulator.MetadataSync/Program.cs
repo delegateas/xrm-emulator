@@ -75,9 +75,13 @@ if (positionalArgs.Length >= 2 && positionalArgs[0].Equals("mcp", StringComparis
 
 try
 {
-    // 1. Parse configuration from user secrets + CLI args
+    // 1. Parse configuration from user secrets + environment + CLI args (last wins).
+    // Environment variables are how a service-principal run supplies its client secret: a CLI
+    // argument would land in shell history and in the process list, and user secrets do not exist
+    // on a machine that only has the published binary.
     var configuration = new ConfigurationBuilder()
         .AddUserSecrets<Program>(optional: true)
+        .AddEnvironmentVariables()
         .AddCommandLine(args)
         .Build();
 
@@ -276,7 +280,7 @@ try
     }
     else if (positionalArgs.Length > 0 && positionalArgs[0].Equals("commit", StringComparison.OrdinalIgnoreCase))
     {
-        await HandleCommitCommand(configuration, noCache, debug);
+        await HandleCommitCommand(args, configuration, noCache, debug);
     }
     else if (positionalArgs.Length >= 1 && positionalArgs[0].Equals("init-connection", StringComparison.OrdinalIgnoreCase))
     {
@@ -2147,6 +2151,14 @@ static bool HasFlag(string[] allArgs, string flag)
     return allArgs.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
 }
 
+/// <summary>
+/// First value that is neither null nor whitespace, trimmed. Blank is treated as absent so an
+/// environment variable that exists but is empty falls through to the next source instead of being
+/// sent onwards as "".
+/// </summary>
+static string? FirstNonBlank(params string?[] values)
+    => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim();
+
 static void PrintHelp()
 {
     AnsiConsole.Write(
@@ -2204,7 +2216,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [bold]plugin step enable|disable[/] <step-id>               Toggle a plugin step on/off (e.g. temporarily lift a guard)");
     AnsiConsole.MarkupLine("  [bold]cert generate[/] [[--name <cn>]] [[--out <pfx>]] [[--password <p>]] [[--years <n>]]  Generate a self-signed code-signing cert");
     AnsiConsole.MarkupLine("  [bold]cert show-fic[/] [[--pfx <path>]] [[--password <p>]]    Print Power Platform federated identity credential values");
-    AnsiConsole.MarkupLine("  [bold]commit[/]                                             Push pending changes to CRM");
+    AnsiConsole.MarkupLine("  [bold]commit[/] [[--impersonate <user>]]                       Push pending changes to CRM (data imports run as <user>)");
     AnsiConsole.MarkupLine("  [bold]init-connection[/] --environment-url <url> [[--client-id <id>]]  Write connection_metadata.json without a full sync (use before solution import)");
     AnsiConsole.MarkupLine("  [bold]git-init[/]                                           Initialize git tracking in SolutionExport/");
     AnsiConsole.WriteLine();
@@ -2212,6 +2224,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  --help, -h       Show this help");
     AnsiConsole.MarkupLine("  --no-cache        Skip auth token cache");
     AnsiConsole.MarkupLine("  --debug           Enable debug logging (for commit)");
+    AnsiConsole.MarkupLine("  --impersonate <user>  Run data imports as this user — GUID, full name or sign-in name");
+    AnsiConsole.MarkupLine("                    (env: DATAVERSE_IMPERSONATE). An import file naming its own user wins.");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[yellow]Workflow:[/]");
     AnsiConsole.MarkupLine("  1. Run full sync (no command) to pull metadata from CRM");
@@ -6452,7 +6466,7 @@ static void HandleOptionSetAddValueCommand(string[] positionalArgs, string[] all
 }
 
 // ──────────────────────────────────────────────────────────────
-// import <table> [file]  — scaffold or stage a data import file
+// import <table> [file] [--name <filename>]  — scaffold or stage a data import file
 // ──────────────────────────────────────────────────────────────
 static void HandlePcfCommand(string[] positionalArgs, string[] allArgs)
 {
@@ -6678,13 +6692,35 @@ static void HandleImportCommand(string[] positionalArgs, string[] allArgs)
         AnsiConsole.MarkupLine("  import <table>         Scaffold an empty import template");
         AnsiConsole.MarkupLine("  import <table> <file>  Stage an existing import file");
         AnsiConsole.MarkupLine("");
+        AnsiConsole.MarkupLine("[grey]  --name <filename>    Staged filename (default: <table>.import.json).[/]");
+        AnsiConsole.MarkupLine("[grey]                       Use it to stage several files for the same table —[/]");
+        AnsiConsole.MarkupLine("[grey]                       they commit in filename order, so prefix them 10-, 20-, …[/]");
+        AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[grey]Example: import kf_partnerformline[/]");
         AnsiConsole.MarkupLine("[grey]Example: import kf_partnerformline data/templates.import.json[/]");
+        AnsiConsole.MarkupLine("[grey]Example: import account partners.json --name 20-account-partners.import.json[/]");
         Environment.Exit(1);
     }
 
     var tableName = positionalArgs[1].ToLowerInvariant();
     var sourceFile = positionalArgs.Length >= 3 ? positionalArgs[2] : null;
+
+    // Several import files can target the same table (e.g. one account file per hierarchy level,
+    // committed in order). Without --name they would all collapse onto <table>.import.json.
+    var fileName = ParseNamedArg(allArgs, "--name");
+    if (fileName != null)
+    {
+        if (Path.GetFileName(fileName) != fileName)
+        {
+            AnsiConsole.MarkupLine($"[red]--name must be a filename, not a path:[/] {fileName}");
+            Environment.Exit(1);
+        }
+        if (!fileName.EndsWith(".import.json", StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine($"[red]--name must end in .import.json:[/] {fileName}");
+            Environment.Exit(1);
+        }
+    }
 
     var metadataPath = FindConnectionMetadata();
     var baseDir = GetBaseDir(metadataPath);
@@ -6692,7 +6728,7 @@ static void HandleImportCommand(string[] positionalArgs, string[] allArgs)
     var pendingDir = Path.Combine(solutionExportDir, "_pending", "Import");
     Directory.CreateDirectory(pendingDir);
 
-    var destPath = Path.Combine(pendingDir, $"{tableName}.import.json");
+    var destPath = Path.Combine(pendingDir, fileName ?? $"{tableName}.import.json");
 
     if (sourceFile != null)
     {
@@ -9058,7 +9094,10 @@ static void HandlePendingCommand()
     {
         var parsed = JsonSerializer.Deserialize<DataImportDefinition>(File.ReadAllText(f),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
-        items.Add(("Import", $"{parsed.Table} ({parsed.Rows.Count} rows, match: {string.Join("+", parsed.MatchOn)})", Path.GetRelativePath(pendingDir, f)));
+        var importLabel = string.IsNullOrWhiteSpace(parsed.Label)
+            ? parsed.Table
+            : $"{parsed.Label} [{parsed.Table}]";
+        items.Add(("Import", $"{importLabel} ({parsed.Rows.Count} rows, match: {string.Join("+", parsed.MatchOn)})", Path.GetRelativePath(pendingDir, f)));
     }
 
     var pendingPcfFiles = Directory.GetFiles(pendingDir, "*.pcf.json", SearchOption.AllDirectories)
@@ -9163,12 +9202,24 @@ static void HandlePendingCommand()
     AnsiConsole.WriteLine();
 }
 
-static async Task HandleCommitCommand(IConfiguration configuration, bool noCache, bool debug)
+static async Task HandleCommitCommand(string[] allArgs, IConfiguration configuration, bool noCache, bool debug)
 {
     var metadataPath = FindConnectionMetadata();
     var metadata = ReadConnectionMetadata(metadataPath);
     var baseDir = GetBaseDir(metadataPath);
     var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending");
+
+    // Data imports can be run as another user, so target plugins execute with that user's access
+    // (a service principal often has none of the integration permissions a person has). The user
+    // exists only in the target environment, so it is named at run time rather than in the import
+    // files: --impersonate "<name|sign-in name|guid>", or DATAVERSE_IMPERSONATE for unattended runs.
+    // An import file that names its own user still wins over this.
+    // Read with ParseNamedArg rather than from configuration: AddCommandLine pairs a prefixed key
+    // with the following token, so a valueless flag ahead of it (--debug) consumes "--impersonate"
+    // as its own value and the real pair is dropped.
+    var impersonate = FirstNonBlank(
+        ParseNamedArg(allArgs, "--impersonate"),
+        configuration["DATAVERSE_IMPERSONATE"]);
 
     StreamWriter? debugLog = null;
     if (debug)
@@ -9182,6 +9233,7 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         debugLog.WriteLine($"  pendingDir: {pendingDir}");
         debugLog.WriteLine($"  environment: {metadata.Environment.Url}");
         debugLog.WriteLine($"  solution: {metadata.Solution?.UniqueName ?? "(none)"}");
+        debugLog.WriteLine($"  impersonate: {impersonate ?? "(none)"}");
         AnsiConsole.MarkupLine($"[grey]Debug log: {logPath}[/]");
     }
     void Log(string message) { debugLog?.WriteLine($"[{DateTime.UtcNow:O}] {message}"); }
@@ -9286,6 +9338,31 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
     using var client = await ConnectionFactory.CreateAsync(connectionSettings);
     Log("Connected successfully.");
 
+    // Resolve the impersonation target before writing anything: a typo in a name should stop the
+    // commit here, not part-way through the first import file.
+    if (!string.IsNullOrWhiteSpace(impersonate))
+    {
+        var target = CommitPipeline.ResolveImpersonationTarget(client, impersonate);
+
+        // The resolved name is echoed, not just the id: when the operator pasted a GUID this is the
+        // only chance to notice it points at somebody else before the rows are written.
+        var shown = string.IsNullOrWhiteSpace(target.FullName) ? impersonate : target.FullName!;
+        AnsiConsole.MarkupLine($"[grey]Data imports run as[/] {Markup.Escape(shown)} [grey]({target.Id})[/]");
+        Log($"Impersonation target resolved: {impersonate} = {shown} ({target.Id})");
+
+        // Being blocked from signing in is normal for a user that exists only to be impersonated;
+        // being disabled in Dataverse is not the same thing, and the platform refuses to impersonate
+        // one. Say so here rather than let it surface as a failure on row 1.
+        if (target.Disabled)
+        {
+            AnsiConsole.MarkupLine(
+                "[yellow]Warning:[/] that user is disabled in Dataverse, and impersonating a disabled " +
+                "user is refused. Enable the user record (blocking sign-in is a separate setting) " +
+                "before running the import.");
+            Log("WARNING: impersonation target is disabled in Dataverse.");
+        }
+    }
+
     // Execute commit via pipeline
     CommitResult result = null!;
     AnsiConsole.Progress()
@@ -9322,7 +9399,8 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
                         exportTask = ctx.AddTask("[green]Re-exporting solution[/]", maxValue: 1);
                     }
                 },
-                confirm: message => AnsiConsole.Confirm($"[yellow]{message}[/]"));
+                confirm: message => AnsiConsole.Confirm($"[yellow]{message}[/]"),
+                defaultImpersonate: impersonate);
 
             commitTask.Increment(1);
             ribbonTask?.Increment(1);
@@ -9363,14 +9441,18 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
     AnsiConsole.WriteLine();
 
     var verifyExportDir = Path.Combine(baseDir, "SolutionExport");
-    var verifySolutionFolder = GetSolutionFolder(verifyExportDir);
+    // Null for a data-only environment folder: there is no exported solution to compare against,
+    // and none is needed — data imports report their own row counts and are verified as pushed.
+    var verifySolutionFolder = TryGetSolutionFolder(verifyExportDir);
     var committedDir = Path.Combine(baseDir, "SolutionExport", "_committed");
 
     foreach (var item in result.Committed)
     {
         var relativePath = Path.GetRelativePath(pendingDir, item.FilePath).Replace('\\', '/');
         var committedPath = Path.Combine(committedDir, relativePath);
-        var snapshotPath = Path.Combine(verifySolutionFolder, relativePath);
+        var snapshotPath = verifySolutionFolder is null
+            ? null
+            : Path.Combine(verifySolutionFolder, relativePath);
 
         var isNewView = item.Type == CommitItemType.SavedQuery
             && ((SavedQueryDefinition)item.ParsedData).SavedQueryId == Guid.Empty;
@@ -9402,6 +9484,11 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
         if (item.Type == CommitItemType.PluginRegistration)
         {
             var pluginDef = (PluginRegistrationDefinition)item.ParsedData;
+            if (verifySolutionFolder is null)
+            {
+                AnsiConsole.MarkupLine($"[yellow]⚠[/] {Markup.Escape(item.DisplayName)} — pushed, but no exported solution to verify against");
+                continue;
+            }
             var pluginAssemblyDirs = Directory.Exists(Path.Combine(verifySolutionFolder, "PluginAssemblies"))
                 ? Directory.GetDirectories(Path.Combine(verifySolutionFolder, "PluginAssemblies"))
                 : Array.Empty<string>();
@@ -9486,6 +9573,10 @@ static async Task HandleCommitCommand(IConfiguration configuration, bool noCache
             {
                 AnsiConsole.MarkupLine($"[green]\u2713[/] {Markup.Escape(item.DisplayName)} \u2014 pushed & archived");
             }
+        }
+        else if (snapshotPath is null)
+        {
+            AnsiConsole.MarkupLine($"[green]\u2713[/] {Markup.Escape(item.DisplayName)} \u2014 pushed & archived (no exported solution to compare against)");
         }
         else if (!File.Exists(snapshotPath))
         {
@@ -9862,6 +9953,9 @@ static void WriteConnectionMetadata(
         },
         AuthMode = connectionSettings.AuthMode.ToString(),
         ClientId = connectionSettings.ClientId,
+        // Recorded so a later ClientSecret run needs only the secret itself. Null for the
+        // interactive modes, which discover the tenant from the signed-in account.
+        TenantId = connectionSettings.TenantId,
         SyncedAt = DateTimeOffset.UtcNow
     };
 
@@ -9939,6 +10033,9 @@ static async Task<ConnectionSettings> ReconnectFromMetadata(
 {
     if (Enum.TryParse<AuthMode>(metadata.AuthMode, ignoreCase: true, out var authMode))
     {
+        if (authMode == AuthMode.ClientSecret)
+            return BuildClientSecretSettings(metadata, configuration);
+
         return new ConnectionSettings
         {
             Url = metadata.Environment.Url,
@@ -9948,20 +10045,126 @@ static async Task<ConnectionSettings> ReconnectFromMetadata(
         };
     }
 
-    // Fallback to interactive wizard
-    AnsiConsole.MarkupLine("[yellow]Could not determine auth mode from metadata. Running connection wizard...[/]");
-    return await ConnectionWizard.RunAsync(configuration, noCache);
+    // No recorded auth mode: the folder names the environment but leaves the identity to the person
+    // running. Normal for a folder prepared for someone else — not an error, so it is not reported as
+    // one. A value that is present but unrecognised is a different matter and is called out.
+    if (string.IsNullOrWhiteSpace(metadata.AuthMode))
+        AnsiConsole.MarkupLine($"[grey]Target:[/] {Markup.Escape(metadata.Environment.Url)}");
+    else
+        AnsiConsole.MarkupLine(
+            $"[yellow]Unrecognised auth mode '{Markup.Escape(metadata.AuthMode)}' in connection_metadata.json.[/]");
+
+    // Seed the wizard with what the folder does know, so only the identity is asked for. The URL and
+    // tenant are environment facts; the client id is not seeded, because it belongs to a specific
+    // identity and the recorded one may have been for a different auth mode than the one now chosen.
+    // Anything already supplied on the command line or in the environment still wins.
+    var seeded = new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Url"] = metadata.Environment.Url,
+            ["TenantId"] = metadata.TenantId
+        })
+        .AddConfiguration(configuration)
+        .Build();
+
+    return await ConnectionWizard.RunAsync(seeded, noCache);
+}
+
+/// <summary>
+/// Builds ClientSecret (service-principal) settings for an existing environment folder.
+///
+/// The client id and tenant id may be recorded in connection_metadata.json — they are not secrets —
+/// but the secret itself is never read from there and never written there. It is supplied per run,
+/// from CLI arguments / user secrets, from DATAVERSE_CLIENT_SECRET, or from a masked prompt.
+///
+/// This mode exists so a run can be unattended, so it must not hang waiting for a prompt nobody can
+/// see: with input redirected and no secret supplied, it fails naming the variable to set.
+/// </summary>
+static ConnectionSettings BuildClientSecretSettings(ConnectionMetadata metadata, IConfiguration configuration)
+{
+    string? Supplied(string key, string envKey)
+    {
+        foreach (var candidate in new[]
+                 {
+                     configuration[key],
+                     configuration[envKey],
+                     Environment.GetEnvironmentVariable(envKey)
+                 })
+        {
+            if (!string.IsNullOrWhiteSpace(candidate))
+                return candidate.Trim();
+        }
+
+        return null;
+    }
+
+    var tenantId = Supplied("TenantId", "DATAVERSE_TENANT_ID") ?? metadata.TenantId;
+    var clientId = Supplied("ClientId", "DATAVERSE_CLIENT_ID") ?? metadata.ClientId;
+    var clientSecret = Supplied("ClientSecret", "DATAVERSE_CLIENT_SECRET");
+
+    // Microsoft's public sample client is what the interactive modes default to, and it has no
+    // secret at all. Left in place when an environment folder is switched to ClientSecret, it fails
+    // as an opaque authentication error, so name the cause here instead.
+    if (clientId == ConnectionSettings.MicrosoftPublicClientId)
+        throw new InvalidOperationException(
+            $"clientId in connection_metadata.json is Microsoft's public sample client " +
+            $"({ConnectionSettings.MicrosoftPublicClientId}), which cannot be used with a client secret. " +
+            "Set the app registration's own client id there, or pass DATAVERSE_CLIENT_ID.");
+
+    var missing = new List<string>();
+    if (string.IsNullOrWhiteSpace(tenantId)) missing.Add("DATAVERSE_TENANT_ID (or \"tenantId\" in connection_metadata.json)");
+    if (string.IsNullOrWhiteSpace(clientId)) missing.Add("DATAVERSE_CLIENT_ID (or \"clientId\" in connection_metadata.json)");
+    if (string.IsNullOrWhiteSpace(clientSecret)) missing.Add("DATAVERSE_CLIENT_SECRET");
+
+    if (missing.Count > 0)
+    {
+        if (Console.IsInputRedirected)
+            throw new InvalidOperationException(
+                $"authMode is ClientSecret but no terminal is attached to prompt for: {string.Join(", ", missing)}.");
+
+        AnsiConsole.MarkupLine($"[grey]Signing in to {Markup.Escape(metadata.Environment.Url)} with a client secret.[/]");
+
+        if (string.IsNullOrWhiteSpace(tenantId))
+            tenantId = AnsiConsole.Prompt(new TextPrompt<string>("Enter [green]Tenant ID[/]:"));
+        if (string.IsNullOrWhiteSpace(clientId))
+            clientId = AnsiConsole.Prompt(new TextPrompt<string>("Enter [green]Client ID[/] (App Registration):"));
+        if (string.IsNullOrWhiteSpace(clientSecret))
+            clientSecret = AnsiConsole.Prompt(new TextPrompt<string>("Enter [green]Client Secret[/]:").Secret());
+    }
+
+    return new ConnectionSettings
+    {
+        Url = metadata.Environment.Url,
+        AuthMode = AuthMode.ClientSecret,
+        TenantId = tenantId,
+        ClientId = clientId,
+        ClientSecret = clientSecret
+    };
 }
 
 static string GetSolutionFolder(string solutionExportDir)
 {
+    return TryGetSolutionFolder(solutionExportDir)
+        ?? throw new InvalidOperationException("No solution folder found in SolutionExport/");
+}
+
+/// <summary>
+/// Returns the solution export folder, or null when there is none. An environment folder set up
+/// purely for data import has no exported solution (and "solution": null in its connection
+/// metadata), which is a valid state — callers that only need the folder to compare snapshots
+/// should degrade instead of throwing.
+/// </summary>
+static string? TryGetSolutionFolder(string solutionExportDir)
+{
+    if (!Directory.Exists(solutionExportDir))
+        return null;
+
     return Directory.GetDirectories(solutionExportDir)
         .FirstOrDefault(d =>
         {
             var name = Path.GetFileName(d);
             return !name.StartsWith('.') && !name.StartsWith('_');
-        })
-        ?? throw new InvalidOperationException("No solution folder found in SolutionExport/");
+        });
 }
 
 /// <summary>

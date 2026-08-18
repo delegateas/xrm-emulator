@@ -370,8 +370,13 @@ public static class CommitPipeline
         {
             var parsed = JsonSerializer.Deserialize<DataImportDefinition>(File.ReadAllText(f),
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            // The filename carries the execution order (same-type items sort by it), so show it:
+            // the operator selects from this list and needs to see which file is which.
+            var importName = string.IsNullOrWhiteSpace(parsed.Label)
+                ? parsed.Table
+                : $"{parsed.Label} [{parsed.Table}]";
             commitItems.Add(new CommitItem(CommitItemType.DataImport,
-                $"Import: {parsed.Table} ({parsed.Rows.Count} row(s), match on: {string.Join("+", parsed.MatchOn)})",
+                $"Import {Path.GetFileName(f)}: {importName} ({parsed.Rows.Count} row(s), match on: {string.Join("+", parsed.MatchOn)})",
                 f, parsed));
         }
 
@@ -805,6 +810,11 @@ public static class CommitPipeline
     /// Execute the commit for the selected items. Non-interactive — no Spectre.Console.
     /// Returns a CommitResult with committed items and optional failure info.
     /// </summary>
+    /// <param name="defaultImpersonate">
+    /// Systemuser GUID or exact fullname to run data imports as when the import file does not name
+    /// one itself. Lets the operator decide the identity at run time — the user only exists in the
+    /// target environment, so it cannot be known when the import files are generated.
+    /// </param>
     public static CommitResult ExecuteCommit(
         IOrganizationService client,
         ConnectionMetadata metadata,
@@ -812,7 +822,8 @@ public static class CommitPipeline
         List<CommitItem> selected,
         Action<string>? log = null,
         Action<string>? onPhaseChanged = null,
-        Func<string, bool>? confirm = null)
+        Func<string, bool>? confirm = null,
+        string? defaultImpersonate = null)
     {
         var pendingDir = Path.Combine(baseDir, "SolutionExport", "_pending");
         var outputsPath = Path.Combine(pendingDir, "_outputs.json");
@@ -2592,25 +2603,31 @@ public static class CommitPipeline
                         var def = (DataImportDefinition)item.ParsedData;
                         log?.Invoke($"Importing {def.Rows.Count} row(s) into {def.Table} (match on: {string.Join("+", def.MatchOn)})");
 
-                        // Optional per-file impersonation: run this import's writes as a specific user
+                        // Optional impersonation: run this import's writes as a specific user
                         // (CallerId) so target plugins execute under that user's context — e.g. a
                         // virtual-table / BFF call authorized against the caller's MIA permission.
+                        // The import file names the user when it is known at generation time;
+                        // otherwise the operator supplies one for the whole commit and it applies to
+                        // every file that does not override it.
                         // client is typed IOrganizationService, so set CallerId reflectively (it is a
                         // ServiceClient underneath). Restored in finally so it never leaks to other items.
+                        var impersonateAs = string.IsNullOrWhiteSpace(def.Impersonate)
+                            ? defaultImpersonate
+                            : def.Impersonate;
                         var callerProp = client.GetType().GetProperty("CallerId");
                         object? originalCaller = null;
                         var impersonating = false;
-                        if (!string.IsNullOrWhiteSpace(def.Impersonate))
+                        if (!string.IsNullOrWhiteSpace(impersonateAs))
                         {
                             if (callerProp == null)
                                 throw new InvalidOperationException(
-                                    $"Import requests impersonation ('{def.Impersonate}') but the connection type " +
+                                    $"Import requests impersonation ('{impersonateAs}') but the connection type " +
                                     $"'{client.GetType().Name}' has no CallerId property.");
-                            var callerId = ResolveImpersonationUserId(client, def.Impersonate!);
+                            var callerId = ResolveImpersonationUserId(client, impersonateAs!);
                             originalCaller = callerProp.GetValue(client);
                             callerProp.SetValue(client, callerId);
                             impersonating = true;
-                            log?.Invoke($"  Impersonating '{def.Impersonate}' ({callerId}) for this import.");
+                            log?.Invoke($"  Impersonating '{impersonateAs}' ({callerId}) for this import.");
                         }
 
                         var created = 0;
@@ -2841,8 +2858,13 @@ public static class CommitPipeline
             }
         }
 
-        // Publish + Re-export only if all items succeeded
-        if (committedItems.Count > 0 && failedItem == null)
+        // Publish + Re-export only if all items succeeded. A commit that only imported data
+        // rows changed no customizations, so there is nothing to publish and nothing new to
+        // export — and such a folder need not name a solution at all (a migration folder that
+        // only carries Import/ files typically doesn't).
+        var dataOnlyCommit = committedItems.Count > 0 && committedItems.All(i =>
+            i.Type is CommitItemType.DataImport or CommitItemType.AssociationsImport);
+        if (committedItems.Count > 0 && failedItem == null && !dataOnlyCommit)
         {
             onPhaseChanged?.Invoke("Publishing customizations...");
             log?.Invoke("Publishing all customizations...");
@@ -3139,23 +3161,71 @@ public static class CommitPipeline
     }
 
     /// <summary>
-    /// Resolve an impersonation target (systemuser GUID or exact fullname) to a systemuser id.
+    /// The user a data import runs as, resolved from what the operator typed.
+    /// <see cref="Disabled"/> is carried along because impersonating a disabled user is refused by
+    /// the platform, and a user that exists but cannot be impersonated is worth saying out loud
+    /// before the first row is written.
     /// </summary>
-    private static Guid ResolveImpersonationUserId(IOrganizationService client, string userRef)
+    internal sealed record ImpersonationTarget(Guid Id, string? FullName, bool Disabled);
+
+    /// <summary>
+    /// Resolve an impersonation target. Accepts a GUID, an exact fullname, or the sign-in name
+    /// (domainname / primary email) — an operator setting this at run time knows the user by the
+    /// address they were invited with far more reliably than by the display name CRM composed for
+    /// them, while a user that cannot sign in at all is usually known only by its id.
+    ///
+    /// A GUID is verified rather than trusted: an id copied from the wrong environment, or with a
+    /// character lost on the way, would otherwise first show up as a failure mid-import.
+    /// </summary>
+    internal static ImpersonationTarget ResolveImpersonationTarget(IOrganizationService client, string userRef)
     {
+        var columns = new ColumnSet("fullname", "isdisabled");
+
+        static ImpersonationTarget ToTarget(Entity user) => new(
+            user.Id,
+            user.GetAttributeValue<string>("fullname"),
+            user.GetAttributeValue<bool>("isdisabled"));
+
         if (Guid.TryParse(userRef, out var id))
-            return id;
+        {
+            try
+            {
+                return ToTarget(client.Retrieve("systemuser", id, columns));
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Impersonation user {id} does not exist in this environment.", ex);
+            }
+        }
 
         var query = new QueryExpression("systemuser")
         {
-            ColumnSet = new ColumnSet(false),
-            TopCount = 1,
-            Criteria = { Conditions = { new ConditionExpression("fullname", ConditionOperator.Equal, userRef) } },
+            ColumnSet = columns,
+            TopCount = 2,
+            Criteria =
+            {
+                FilterOperator = LogicalOperator.Or,
+                Conditions =
+                {
+                    new ConditionExpression("fullname", ConditionOperator.Equal, userRef),
+                    new ConditionExpression("domainname", ConditionOperator.Equal, userRef),
+                    new ConditionExpression("internalemailaddress", ConditionOperator.Equal, userRef),
+                },
+            },
         };
-        var user = client.RetrieveMultiple(query).Entities.FirstOrDefault()
-            ?? throw new InvalidOperationException($"Impersonation user not found (fullname='{userRef}'). Use the systemuser GUID or exact fullname.");
-        return user.Id;
+        var users = client.RetrieveMultiple(query).Entities;
+        if (users.Count == 0)
+            throw new InvalidOperationException(
+                $"Impersonation user not found ('{userRef}'). Use the systemuser GUID, the exact full name, or the sign-in name.");
+        if (users.Count > 1)
+            throw new InvalidOperationException(
+                $"Impersonation target '{userRef}' matches more than one user. Use the systemuser GUID instead.");
+        return ToTarget(users[0]);
     }
+
+    internal static Guid ResolveImpersonationUserId(IOrganizationService client, string userRef)
+        => ResolveImpersonationTarget(client, userRef).Id;
 
     private static void ScanSavedQueriesInDir(string rootDir, string entityFolderName,
         Dictionary<Guid, string> views)
