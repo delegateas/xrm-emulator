@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/delegateas/xrm-emulator/compare/v1.7.0...v1.8.0) (2026-08-18)
+
+
+### Features
+
+* enhance data import process with improved error handling and output management ([33db60f](https://github.com/delegateas/xrm-emulator/commit/33db60f66f790b3073b539785cebd9d3edede996))
+
 ## [1.7.0](https://github.com/delegateas/xrm-emulator/compare/v1.6.0...v1.7.0) (2026-08-18)
 
 
