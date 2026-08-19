@@ -856,6 +856,14 @@ public static class CommitPipeline
         var committedItems = new List<CommitItem>();
         var archivedGitPaths = new List<string>(); // Track files for targeted git commit
 
+        // Resolve every target-side lookup before the first write, so a missing record in the target is a
+        // list produced up front rather than a stop after a few hundred rows. Files that allow such rows to
+        // be skipped are reported and continue; anything else stops the commit while nothing is written.
+        onPhaseChanged?.Invoke("Preflight: checking references in the target...");
+        var preflightMisses = DataImportPreflight.Run(client, orderedItems, pendingDir, log);
+        if (preflightMisses.Any(m => !m.Skippable))
+            throw new InvalidOperationException(DataImportPreflight.BuildBlockingMessage(preflightMisses));
+
         // Publish schema changes before data operations to ensure new fields are available.
         // This handles both same-commit (NewAttribute + DataImport) and resume scenarios
         // (NewAttribute committed previously but publish failed due to DataImport error).
@@ -2673,6 +2681,8 @@ public static class CommitPipeline
 
                         var created = 0;
                         var updated = 0;
+                        var skipped = 0;
+                        var skippedKeys = new List<string>();
                         var rowIndex = 0;
                         // Shared cache for lookup:tablename:fieldname resolutions within this file
                         var lookupCache = new Dictionary<string, EntityReference>(StringComparer.Ordinal);
@@ -2702,6 +2712,17 @@ public static class CommitPipeline
                                 log?.Invoke($"  {(wasCreated ? "Created" : "Updated")} {def.Table} {id} [{rowLabel}]");
                                 rowOutputs[matchKey] = id.ToString();
                             }
+                            catch (LookupNotFoundException lookupEx)
+                                when (def.SkipRowsWithUnresolvedLookups == true)
+                            {
+                                // The record this row points at does not exist in the target yet. The file
+                                // says such a row may wait: skip it, name it in the log, and count it in the
+                                // summary. Re-running the file once the record exists creates exactly these
+                                // rows — they are upserted on the match key, so the rest is left alone.
+                                skipped++;
+                                skippedKeys.Add(rowLabel);
+                                log?.Invoke($"  SKIPPED row {rowIndex} [{rowLabel}]: {lookupEx.Message}");
+                            }
                             catch (Exception rowEx)
                             {
                                 throw new InvalidOperationException(
@@ -2719,7 +2740,20 @@ public static class CommitPipeline
                             // key, so a re-run refills the rest without duplicating anything.
                             resolvedOutputs[relativePath] = rowOutputs;
                         }
-                        log?.Invoke($"  Import complete: {created} created, {updated} updated.");
+                        if (skipped > 0)
+                        {
+                            // Repeated at the end because the per-row lines scroll past in a large file, and a
+                            // short import must not be something the operator has to go looking for.
+                            log?.Invoke($"  Import complete: {created} created, {updated} updated, "
+                                        + $"{skipped} SKIPPED (referenced record missing in the target).");
+                            log?.Invoke($"  Skipped: {string.Join("; ", skippedKeys)}");
+                            log?.Invoke("  Create the missing records, then run this file again — only the "
+                                        + "skipped rows will be added.");
+                        }
+                        else
+                        {
+                            log?.Invoke($"  Import complete: {created} created, {updated} updated.");
+                        }
                         break;
                     }
 

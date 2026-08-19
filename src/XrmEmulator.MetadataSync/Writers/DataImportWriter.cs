@@ -6,6 +6,29 @@ using Microsoft.Xrm.Sdk.Query;
 
 namespace XrmEmulator.MetadataSync.Writers;
 
+/// <summary>
+/// A <c>lookup:&lt;table&gt;:&lt;field&gt;</c> value has no match in the target environment. Its own type
+/// rather than a plain <see cref="InvalidOperationException"/> because it is the one import failure a
+/// caller may legitimately choose to skip: the row points at a record that has to be created in the
+/// target by someone else first, which is a different situation from a malformed row. An *ambiguous*
+/// lookup is deliberately not this type — two candidate records mean the target data must be fixed,
+/// never that the row should quietly be left out.
+/// </summary>
+public sealed class LookupNotFoundException : InvalidOperationException
+{
+    public LookupNotFoundException(string table, string field, string value, string message)
+        : base(message)
+    {
+        Table = table;
+        Field = field;
+        Value = value;
+    }
+
+    public string Table { get; }
+    public string Field { get; }
+    public string Value { get; }
+}
+
 public static class DataImportWriter
 {
     /// <summary>
@@ -275,7 +298,7 @@ public static class DataImportWriter
         };
         var matches = service.RetrieveMultiple(query).Entities;
         if (matches.Count == 0)
-            throw new InvalidOperationException(
+            throw new LookupNotFoundException(table, matchField, matchValue,
                 $"Cannot resolve lookup: no '{table}' record found where {matchField} = '{matchValue}'");
         if (matches.Count > 1)
             throw new InvalidOperationException(

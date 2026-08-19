@@ -35,5 +35,18 @@ public record DataImportDefinition
     /// </summary>
     public string? Impersonate { get; init; }
 
+    /// <summary>
+    /// When true, a row whose <c>lookup:&lt;table&gt;:&lt;field&gt;</c> value has no match in the target
+    /// environment is skipped and counted instead of failing the file.
+    /// Set it only where the referenced record is somebody else's to create — a migration that points at
+    /// users the target environment has not been given yet — and where the rest of the file is worth
+    /// having in the meantime. Rows are upserted on their match key, so re-running the file once the
+    /// records exist adds exactly the skipped rows and leaves the others untouched.
+    /// It is not a way to make a file "pass": every skipped row is logged with its key and counted in
+    /// the file's summary, because a quietly short import is worse than a loud failure.
+    /// An ambiguous lookup is never skipped — see <see cref="Writers.LookupNotFoundException"/>.
+    /// </summary>
+    public bool? SkipRowsWithUnresolvedLookups { get; init; }
+
     public required List<Dictionary<string, JsonElement?>> Rows { get; init; }
 }
