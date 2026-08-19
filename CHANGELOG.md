@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/delegateas/xrm-emulator/compare/v1.8.0...v1.9.0) (2026-08-19)
+
+
+### Features
+
+* add preflight check for unresolved lookups and enhance error handling in data import process ([279e24e](https://github.com/delegateas/xrm-emulator/commit/279e24e519e3dc8b61aaa2ec68df262b74b9e2a5))
+* enhance CommitPipeline and DataImportWriter with improved handling for data-only commits and output management ([e9913a5](https://github.com/delegateas/xrm-emulator/commit/e9913a5a6bc6895bc3bb5a74b1afca026a4a7dc1))
+
 ## [1.8.0](https://github.com/delegateas/xrm-emulator/compare/v1.7.0...v1.8.0) (2026-08-18)
 
 
