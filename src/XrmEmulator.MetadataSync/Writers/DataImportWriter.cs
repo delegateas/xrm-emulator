@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.ServiceModel;
 using System.Text.Json;
 using Microsoft.Xrm.Sdk;
@@ -237,6 +238,13 @@ public static class DataImportWriter
                 JsonValueKind.False => false,
                 _ => value.GetString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true
             },
+            // Parsed as UTC, not local: a DateOnly column must land on the date written in the
+            // file no matter which time zone the import is run in, and a machine east of UTC
+            // would otherwise push midnight back to the previous day.
+            "date" or "datetime" => DateTime.Parse(
+                value.GetString()!,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal),
             "lookup" => ParseEntityReference(value.GetString()!),
             "multiselect" => ParseMultiSelect(value.GetString()!),
             _ => throw new InvalidOperationException($"Unknown field type: '{declaredType}'")

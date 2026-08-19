@@ -4810,11 +4810,12 @@ static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, 
 {
     if (positionalArgs.Length < 2)
     {
-        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync query <table> [--select col1,col2] [--filter field=value] [--top N] [--fetchxml \"<fetch>...\"]");
+        AnsiConsole.MarkupLine("[red]Usage:[/] MetadataSync query <table> [--select col1,col2] [--filter field=value] [--top N] [--fetchxml \"<fetch>...\"] [--out file.json]");
         AnsiConsole.MarkupLine("[grey]Examples:[/]");
         AnsiConsole.MarkupLine("[grey]  query kf_partnerrelation --select kf_name,kf_account,kf_contact --top 10[/]");
         AnsiConsole.MarkupLine("[grey]  query contact --filter firstname=Poul --select firstname,lastname,emailaddress1[/]");
         AnsiConsole.MarkupLine("[grey]  query kf_partnerrelation --fetchxml \"<fetch top='10'><entity name='kf_partnerrelation'><all-attributes/></entity></fetch>\"[/]");
+        AnsiConsole.MarkupLine("[grey]  query account --select name --out accounts.json    # exact JSON, no console line wrapping[/]");
         Environment.Exit(1);
     }
 
@@ -4824,6 +4825,7 @@ static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, 
     var topArg = ParseNamedArg(allArgs, "--top");
     var fetchXml = ParseNamedArg(allArgs, "--fetchxml");
     var impersonateArg = ParseNamedArg(allArgs, "--impersonate");
+    var outArg = ParseNamedArg(allArgs, "--out");
 
     var metadataPath = FindConnectionMetadata();
     var metadata = ReadConnectionMetadata(metadataPath);
@@ -4960,6 +4962,22 @@ static async Task HandleQueryCommand(string[] positionalArgs, string[] allArgs, 
     }
 
     var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
+
+    if (!string.IsNullOrEmpty(outArg))
+    {
+        // AnsiConsole wraps at the console width, which inserts real newlines inside JSON string
+        // values — a long account name or a lookup label silently comes out corrupted, and the
+        // corruption is indistinguishable from a value that genuinely contains a newline. Anything
+        // that feeds data back into CRM (data imports, generators) must take this path.
+        var outPath = Path.GetFullPath(outArg);
+        var outDir = Path.GetDirectoryName(outPath);
+        if (!string.IsNullOrEmpty(outDir))
+            Directory.CreateDirectory(outDir);
+        File.WriteAllText(outPath, json);
+        AnsiConsole.MarkupLine($"[green]Wrote[/] {results.Entities.Count} record(s) [grey]→[/] {outPath}");
+        return;
+    }
+
     AnsiConsole.WriteLine(json);
 }
 
@@ -9098,6 +9116,29 @@ static void HandlePendingCommand()
             ? parsed.Table
             : $"{parsed.Label} [{parsed.Table}]";
         items.Add(("Import", $"{importLabel} ({parsed.Rows.Count} rows, match: {string.Join("+", parsed.MatchOn)})", Path.GetRelativePath(pendingDir, f)));
+    }
+
+    // Associations are staged as their own file type and committed after the imports. They must be
+    // listed here too: an operator who reviews `pending` before committing would otherwise see a
+    // shorter list than the folder holds and have no way to tell a staged association from a
+    // forgotten one.
+    var pendingAssociationsFiles = Directory.GetFiles(pendingDir, "*.associations.json", SearchOption.AllDirectories)
+        .ToList();
+
+    foreach (var f in pendingAssociationsFiles)
+    {
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<AssociationsImportDefinition>(File.ReadAllText(f),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true })!;
+            items.Add(("Associations",
+                $"{parsed.Relationship} ({parsed.Pairs.Count} pair(s), {parsed.Entity1.Table}↔{parsed.Entity2.Table})",
+                Path.GetRelativePath(pendingDir, f)));
+        }
+        catch
+        {
+            items.Add(("Associations", Path.GetFileNameWithoutExtension(f), Path.GetRelativePath(pendingDir, f)));
+        }
     }
 
     var pendingPcfFiles = Directory.GetFiles(pendingDir, "*.pcf.json", SearchOption.AllDirectories)

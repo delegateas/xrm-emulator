@@ -861,7 +861,21 @@ public static class CommitPipeline
         // (NewAttribute committed previously but publish failed due to DataImport error).
         var hasSchemaChanges = orderedItems.Any(i => i.Type is CommitItemType.NewAttribute or CommitItemType.Entity);
         var hasDataImports = orderedItems.Any(i => i.Type == CommitItemType.DataImport);
-        var needsMidCommitPublish = hasSchemaChanges || hasDataImports;
+
+        // A publish makes changed metadata visible to the platform. Data rows need none of it — they
+        // are live the moment Create/Update is acknowledged — so a commit that carries only data has
+        // nothing to publish. Publishing anyway is not merely wasted work: PublishAll is refused while
+        // any solution operation holds the environment's lock, so an unrelated solution import running
+        // in the target turned a data migration that would have succeeded into a hard stop before its
+        // first row. The end-of-commit publish already exempts data-only commits for the same reason.
+        //
+        // The one data-only case that does need it is a resume: a previous run created the attribute,
+        // its publish never completed, and only the imports are left in _pending. That leaves a trace
+        // in _outputs.json, so it is detected instead of assumed for every import.
+        var resumedSchemaChange = resolvedOutputs.Keys.Any(k =>
+            k.EndsWith(".attribute.json", StringComparison.OrdinalIgnoreCase)
+            || k.EndsWith("Entity.xml", StringComparison.OrdinalIgnoreCase));
+        var needsMidCommitPublish = hasSchemaChanges || (hasDataImports && resumedSchemaChange);
         var midCommitPublishDone = false;
 
         foreach (var item in orderedItems)
@@ -871,7 +885,22 @@ public static class CommitPipeline
                 && item.Type != CommitItemType.NewAttribute && item.Type != CommitItemType.Entity)
             {
                 log?.Invoke("Publishing schema changes before data operations...");
-                SavedQueryWriter.PublishAll(client);
+                try
+                {
+                    SavedQueryWriter.PublishAll(client);
+                }
+                catch (Exception ex) when (ex.Message.Contains("[PublishAll]", StringComparison.OrdinalIgnoreCase)
+                                          && ex.Message.Contains("running at this moment", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The platform's own wording ("another [Import] running") reads like the data import
+                    // failed. It is the opposite: a solution operation somewhere else in the environment
+                    // holds the lock. Say which, and that nothing has been written yet.
+                    throw new InvalidOperationException(
+                        "The target environment is busy with a solution import, so the schema changes in this "
+                        + "commit cannot be published — and the data rows must not be written before the new "
+                        + "columns exist. Nothing has been written. Wait for the solution import to finish "
+                        + "(Solution History in the target), then run the commit again.", ex);
+                }
                 log?.Invoke("  Published OK.");
                 midCommitPublishDone = true;
             }
